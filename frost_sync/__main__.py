@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 
 from frost_sync.config import load_settings, require_frost_client_id
 from frost_sync.db import create_schema, create_session_factory
@@ -9,6 +10,11 @@ from frost_sync.service import SyncService
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
     parser = argparse.ArgumentParser(description="Sync Frost observations into a local database")
     subparsers = parser.add_subparsers(dest="command", required=True)
 

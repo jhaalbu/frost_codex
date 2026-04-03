@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
@@ -9,6 +10,9 @@ from sqlalchemy.orm import Session
 
 from frost_sync.frost_api import FrostClient, FrostSource, TARGET_ELEMENTS
 from frost_sync.models import Observation, Station, StationCapability, StationLatest
+
+
+logger = logging.getLogger(__name__)
 
 
 ELEMENT_FIELD_MAP = {
@@ -65,15 +69,13 @@ class SyncService:
         ]
 
         for source_id_batch in _chunked(observable_source_ids, source_batch_size):
-            try:
-                observation_rows = self.frost_client.fetch_latest_observations(source_id_batch)
-                batch_written, batch_latest = self._store_observations_batch(stations_by_source, observation_rows)
-                observations_written += batch_written
-                latest_updated += batch_latest
-                self.session.commit()
-            except Exception:
-                self.session.rollback()
-                station_errors += len(source_id_batch)
+            batch_written, batch_latest, batch_errors = self._sync_observation_batch(
+                stations_by_source=stations_by_source,
+                source_id_batch=source_id_batch,
+            )
+            observations_written += batch_written
+            latest_updated += batch_latest
+            station_errors += batch_errors
 
         return SyncSummary(
             stations_seen=len(sources),
@@ -82,6 +84,47 @@ class SyncService:
             latest_updated=latest_updated,
             station_errors=station_errors,
         )
+
+    def _sync_observation_batch(
+        self,
+        stations_by_source: dict[str, Station],
+        source_id_batch: list[str],
+    ) -> tuple[int, int, int]:
+        try:
+            observation_rows = self.frost_client.fetch_latest_observations(source_id_batch)
+            batch_written, batch_latest = self._store_observations_batch(stations_by_source, observation_rows)
+            self.session.commit()
+            return batch_written, batch_latest, 0
+        except Exception as exc:
+            self.session.rollback()
+            if len(source_id_batch) == 1:
+                logger.exception(
+                    "Failed to sync observations for source %s: %s",
+                    source_id_batch[0],
+                    exc,
+                )
+                return 0, 0, 1
+
+            midpoint = len(source_id_batch) // 2
+            logger.warning(
+                "Observation batch failed for %s sources; retrying as smaller batches. First source=%s. Error=%s",
+                len(source_id_batch),
+                source_id_batch[0],
+                exc,
+            )
+            left_written, left_latest, left_errors = self._sync_observation_batch(
+                stations_by_source=stations_by_source,
+                source_id_batch=source_id_batch[:midpoint],
+            )
+            right_written, right_latest, right_errors = self._sync_observation_batch(
+                stations_by_source=stations_by_source,
+                source_id_batch=source_id_batch[midpoint:],
+            )
+            return (
+                left_written + right_written,
+                left_latest + right_latest,
+                left_errors + right_errors,
+            )
 
     def _upsert_stations(self, sources: Iterable[FrostSource]) -> dict[str, Station]:
         now = datetime.now(timezone.utc)

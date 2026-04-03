@@ -16,7 +16,7 @@ class Settings:
     frost_base_url: str = "https://frost.met.no"
     request_timeout_seconds: int = 60
     page_limit: int = 1000
-    source_batch_size: int = 100
+    source_batch_size: int = 25
 
 
 def load_settings() -> Settings:
@@ -26,7 +26,7 @@ def load_settings() -> Settings:
     database_url = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL).strip() or DEFAULT_DATABASE_URL
     timeout = int(os.getenv("FROST_TIMEOUT_SECONDS", "60"))
     page_limit = int(os.getenv("FROST_PAGE_LIMIT", "1000"))
-    source_batch_size = int(os.getenv("FROST_SOURCE_BATCH_SIZE", "100"))
+    source_batch_size = int(os.getenv("FROST_SOURCE_BATCH_SIZE", "25"))
 
     return Settings(
         frost_client_id=client_id,

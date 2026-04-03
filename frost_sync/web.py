@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, time
+from datetime import date, datetime, time, timezone
 from typing import Any
 
 from flask import Blueprint, Flask, abort, jsonify, request
@@ -218,8 +218,8 @@ def _resolve_time_range() -> tuple[datetime, datetime]:
     if date_arg:
         selected_date = date.fromisoformat(date_arg)
         return (
-            datetime.combine(selected_date, time.min, tzinfo=UTC),
-            datetime.combine(selected_date, time.max, tzinfo=UTC),
+            datetime.combine(selected_date, time.min, tzinfo=timezone.utc),
+            datetime.combine(selected_date, time.max, tzinfo=timezone.utc),
         )
 
     if from_arg and to_arg:
@@ -231,8 +231,8 @@ def _resolve_time_range() -> tuple[datetime, datetime]:
 def _parse_timestamp(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _load_capabilities(session) -> dict[int, dict[str, bool]]:
@@ -302,5 +302,5 @@ def _isoformat(value: datetime | None) -> str | None:
     if value is None:
         return None
     if value.tzinfo is None:
-        value = value.replace(tzinfo=UTC)
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
