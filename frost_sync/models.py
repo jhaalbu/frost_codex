@@ -77,6 +77,8 @@ class StationLatest(Base):
     air_temperature_unit: Mapped[Optional[str]] = mapped_column(String(64))
     precipitation_1h: Mapped[Optional[float]] = mapped_column(Float)
     precipitation_1h_unit: Mapped[Optional[str]] = mapped_column(String(64))
+    precipitation_24h: Mapped[Optional[float]] = mapped_column(Float)
+    precipitation_24h_unit: Mapped[Optional[str]] = mapped_column(String(64))
     snow_depth: Mapped[Optional[float]] = mapped_column(Float)
     snow_depth_unit: Mapped[Optional[str]] = mapped_column(String(64))
     wind_from_direction: Mapped[Optional[float]] = mapped_column(Float)

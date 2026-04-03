@@ -17,6 +17,7 @@ class Settings:
     request_timeout_seconds: int = 60
     page_limit: int = 1000
     source_batch_size: int = 25
+    retention_days: int = 14
 
 
 def load_settings() -> Settings:
@@ -27,6 +28,7 @@ def load_settings() -> Settings:
     timeout = int(os.getenv("FROST_TIMEOUT_SECONDS", "60"))
     page_limit = int(os.getenv("FROST_PAGE_LIMIT", "1000"))
     source_batch_size = int(os.getenv("FROST_SOURCE_BATCH_SIZE", "25"))
+    retention_days = int(os.getenv("FROST_RETENTION_DAYS", "14"))
 
     return Settings(
         frost_client_id=client_id,
@@ -34,6 +36,7 @@ def load_settings() -> Settings:
         request_timeout_seconds=timeout,
         page_limit=page_limit,
         source_batch_size=source_batch_size,
+        retention_days=retention_days,
     )
 
 

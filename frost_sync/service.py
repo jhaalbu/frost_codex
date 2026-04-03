@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from frost_sync.frost_api import FrostClient, FrostSource, TARGET_ELEMENTS
@@ -30,6 +30,7 @@ class SyncSummary:
     capabilities_updated: int
     observations_written: int
     latest_updated: int
+    observations_deleted: int
     station_errors: int
 
 
@@ -38,7 +39,12 @@ class SyncService:
         self.session = session
         self.frost_client = frost_client
 
-    def run_hourly_sync(self, page_limit: int, source_batch_size: int = 100) -> SyncSummary:
+    def run_hourly_sync(
+        self,
+        page_limit: int,
+        source_batch_size: int = 100,
+        retention_days: int = 14,
+    ) -> SyncSummary:
         sources = self.frost_client.fetch_sources(page_limit=page_limit)
         stations_by_source = self._upsert_stations(sources)
         capability_source_ids = {
@@ -77,11 +83,15 @@ class SyncService:
             latest_updated += batch_latest
             station_errors += batch_errors
 
+        observations_deleted = self._prune_old_observations(retention_days)
+        self.session.commit()
+
         return SyncSummary(
             stations_seen=len(sources),
             capabilities_updated=capabilities_updated,
             observations_written=observations_written,
             latest_updated=latest_updated,
+            observations_deleted=observations_deleted,
             station_errors=station_errors,
         )
 
@@ -199,7 +209,7 @@ class SyncService:
             if station is None:
                 continue
 
-            reference_time = _parse_reference_time(row.get("referenceTime"))
+            reference_time = _ensure_utc(_parse_reference_time(row.get("referenceTime")))
             if reference_time is None:
                 continue
 
@@ -249,11 +259,42 @@ class SyncService:
                     has_latest_change = True
 
             if has_latest_change:
+                self._refresh_precipitation_24h(latest, station.id)
                 latest.updated_at = now
                 station.last_observation_time = latest.observed_at
                 latest_updates += 1
 
         return written, latest_updates
+
+    def _refresh_precipitation_24h(self, latest: StationLatest, station_id: int) -> None:
+        observed_at = _ensure_utc(latest.observed_at)
+        if observed_at is None:
+            latest.precipitation_24h = None
+            latest.precipitation_24h_unit = None
+            return
+
+        window_start = observed_at - timedelta(hours=24)
+        total = self.session.execute(
+            select(func.sum(Observation.value)).where(
+                Observation.station_id == station_id,
+                Observation.element_id == "sum(precipitation_amount PT1H)",
+                Observation.reference_time > window_start,
+                Observation.reference_time <= observed_at,
+            )
+        ).scalar_one()
+
+        latest.precipitation_24h = float(total) if total is not None else None
+        latest.precipitation_24h_unit = latest.precipitation_1h_unit if total is not None else None
+
+    def _prune_old_observations(self, retention_days: int) -> int:
+        if retention_days <= 0:
+            return 0
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        result = self.session.execute(
+            delete(Observation).where(Observation.reference_time < cutoff)
+        )
+        return result.rowcount or 0
 
 
 def _apply_latest_observation(latest: StationLatest, reference_time: datetime, item: dict) -> bool:
@@ -263,7 +304,7 @@ def _apply_latest_observation(latest: StationLatest, reference_time: datetime, i
         return False
 
     value_field, unit_field = mapped_fields
-    current_time = latest.observed_at
+    current_time = _ensure_utc(latest.observed_at)
     should_update = current_time is None or reference_time >= current_time
 
     if not should_update:
@@ -290,6 +331,14 @@ def _parse_reference_time(value: str | None) -> datetime | None:
     if not value:
         return None
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _ensure_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _format_level(level: dict | None) -> str | None:

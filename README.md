@@ -9,7 +9,7 @@ The local development setup uses SQLite by default. The code is structured so th
 - `stations`: metadata and coordinates for Norwegian stations
 - `station_capabilities`: which requested Frost elements each station exposes
 - `observations`: history table with one row per element and timestamp
-- `station_latest`: one row per station with latest values for map display
+- `station_latest`: one row per station with latest values for map display, including rolling precipitation for the last 24 hours
 
 ## Quick start
 
@@ -33,7 +33,8 @@ Or create a `.env` file in the project root:
 ```text
 FROST_CLIENT_ID=your-client-id
 DATABASE_URL=sqlite:///frost_arcgis.db
-FROST_SOURCE_BATCH_SIZE=100
+FROST_SOURCE_BATCH_SIZE=25
+FROST_RETENTION_DAYS=14
 ```
 
 5. Create the database schema:
@@ -65,6 +66,7 @@ flask --app app run --host 127.0.0.1 --port 5000
 - `GET /api/stations/SN18700/observations?date=2026-04-03`
 
 The `latest.geojson` endpoint is the best starting point for ArcGIS map display because it returns one feature per station with the latest values already flattened into fields.
+It includes both `precipitation_1h` and rolling `precipitation_24h`.
 
 ## Reuse inside an existing Flask app
 
@@ -110,7 +112,8 @@ FROST_CLIENT_ID=your-frost-client-id
 DATABASE_URL=mysql+pymysql://yourusername:your-mysql-password@your-mysql-host/yourusername$weather?charset=utf8mb4
 FROST_TIMEOUT_SECONDS=60
 FROST_PAGE_LIMIT=1000
-FROST_SOURCE_BATCH_SIZE=100
+FROST_SOURCE_BATCH_SIZE=25
+FROST_RETENTION_DAYS=14
 ```
 
 4. Initialize the database:
@@ -145,3 +148,5 @@ mysql+pymysql://yourusername:your-mysql-password@your-mysql-host/yourusername$we
 - For SQLite testing, use a fresh database file when the schema changes significantly.
 - MySQL connections use `pool_recycle=280` and `pool_pre_ping=True`, matching PythonAnywhere's SQLAlchemy guidance.
 - `app.py` expects `FROST_CLIENT_ID` in environment variables or `.env`; the key is no longer hardcoded in source.
+- `FROST_RETENTION_DAYS=14` prunes old rows from `observations` while keeping `station_latest` available for map display.
+- Re-running `python -m frost_sync init-db` is safe and will add newer `station_latest` columns like `precipitation_24h` when needed.

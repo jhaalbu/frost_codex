@@ -288,6 +288,8 @@ def _latest_properties(latest: StationLatest) -> dict[str, Any]:
         "air_temperature_unit": latest.air_temperature_unit,
         "precipitation_1h": latest.precipitation_1h,
         "precipitation_1h_unit": latest.precipitation_1h_unit,
+        "precipitation_24h": latest.precipitation_24h,
+        "precipitation_24h_unit": latest.precipitation_24h_unit,
         "snow_depth": latest.snow_depth,
         "snow_depth_unit": latest.snow_depth_unit,
         "wind_from_direction": latest.wind_from_direction,

@@ -46,6 +46,7 @@ def main() -> None:
             summary = service.run_hourly_sync(
                 page_limit=settings.page_limit,
                 source_batch_size=settings.source_batch_size,
+                retention_days=settings.retention_days,
             )
 
         print(
@@ -54,6 +55,7 @@ def main() -> None:
             f"capabilities_updated={summary.capabilities_updated} "
             f"observations_written={summary.observations_written} "
             f"latest_updated={summary.latest_updated} "
+            f"observations_deleted={summary.observations_deleted} "
             f"station_errors={summary.station_errors}"
         )
         return
