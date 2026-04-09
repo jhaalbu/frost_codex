@@ -14,13 +14,22 @@ from frost_sync.models import Observation, Station, StationCapability, StationLa
 
 logger = logging.getLogger(__name__)
 
+PRECIPITATION_ELEMENT = "sum(precipitation_amount PT1H)"
+AIR_TEMPERATURE_ELEMENT = "air_temperature"
+SNOW_DEPTH_ELEMENT = "snow_depth"
+SURFACE_SNOW_THICKNESS_ELEMENT = "surface_snow_thickness"
+SNOW_DEPTH_ELEMENT_IDS = {SNOW_DEPTH_ELEMENT, SURFACE_SNOW_THICKNESS_ELEMENT}
+WIND_SPEED_ELEMENT = "wind_speed"
+WIND_DIRECTION_ELEMENT = "wind_from_direction"
+
 
 ELEMENT_FIELD_MAP = {
-    "air_temperature": ("air_temperature", "air_temperature_unit"),
-    "sum(precipitation_amount PT1H)": ("precipitation_1h", "precipitation_1h_unit"),
-    "snow_depth": ("snow_depth", "snow_depth_unit"),
-    "wind_from_direction": ("wind_from_direction", "wind_from_direction_unit"),
-    "wind_speed": ("wind_speed", "wind_speed_unit"),
+    AIR_TEMPERATURE_ELEMENT: ("air_temperature", "air_temperature_unit"),
+    PRECIPITATION_ELEMENT: ("precipitation_1h", "precipitation_1h_unit"),
+    SNOW_DEPTH_ELEMENT: ("snow_depth", "snow_depth_unit"),
+    SURFACE_SNOW_THICKNESS_ELEMENT: ("snow_depth", "snow_depth_unit"),
+    WIND_DIRECTION_ELEMENT: ("wind_from_direction", "wind_from_direction_unit"),
+    WIND_SPEED_ELEMENT: ("wind_speed", "wind_speed_unit"),
 }
 
 
@@ -62,7 +71,7 @@ class SyncService:
             available_elements = {
                 element_id
                 for element_id, source_ids in capability_source_ids.items()
-                if source.source_id in source_ids
+                if source.source_id in source_ids and element_id not in SNOW_DEPTH_ELEMENT_IDS
             }
             capabilities_updated += self._upsert_capabilities(station, available_elements)
 
@@ -74,6 +83,8 @@ class SyncService:
             if any(source.source_id in source_ids for source_ids in capability_source_ids.values())
         ]
 
+        snow_capable_source_ids: set[str] = set()
+
         for source_id_batch in _chunked(observable_source_ids, source_batch_size):
             batch_written, batch_latest, batch_errors = self._sync_observation_batch(
                 stations_by_source=stations_by_source,
@@ -82,6 +93,26 @@ class SyncService:
             observations_written += batch_written
             latest_updated += batch_latest
             station_errors += batch_errors
+
+        snow_written, snow_latest, snow_errors = self._sync_snow_observations(
+            stations_by_source=stations_by_source,
+            source_ids=observable_source_ids,
+            source_batch_size=source_batch_size,
+            lookback_days=retention_days,
+            snow_capable_source_ids=snow_capable_source_ids,
+        )
+        observations_written += snow_written
+        latest_updated += snow_latest
+        station_errors += snow_errors
+
+        for source in sources:
+            if source.source_id not in snow_capable_source_ids:
+                continue
+            station = stations_by_source[source.source_id]
+            capabilities_updated += self._upsert_capabilities(
+                station,
+                {SURFACE_SNOW_THICKNESS_ELEMENT},
+            )
 
         observations_deleted = self._prune_old_observations(retention_days)
         self.session.commit()
@@ -94,6 +125,41 @@ class SyncService:
             observations_deleted=observations_deleted,
             station_errors=station_errors,
         )
+
+    def _sync_snow_observations(
+        self,
+        stations_by_source: dict[str, Station],
+        source_ids: list[str],
+        source_batch_size: int,
+        lookback_days: int,
+        snow_capable_source_ids: set[str],
+    ) -> tuple[int, int, int]:
+        written = 0
+        latest = 0
+        errors = 0
+
+        for source_batch in _chunked(source_ids, source_batch_size):
+            try:
+                snow_series_ids = self.frost_client.fetch_snow_series_ids(source_batch, lookback_days=lookback_days)
+                if not snow_series_ids:
+                    continue
+                snow_capable_source_ids.update(_normalize_source_id(series_id) for series_id in snow_series_ids)
+                snow_rows = self.frost_client.fetch_recent_snow_observations(snow_series_ids, lookback_days=lookback_days)
+                batch_written, batch_latest = self._store_observations_batch(stations_by_source, snow_rows)
+                self.session.commit()
+                written += batch_written
+                latest += batch_latest
+            except Exception as exc:
+                self.session.rollback()
+                logger.warning(
+                    "Snow batch failed for %s sources. First source=%s. Error=%s",
+                    len(source_batch),
+                    source_batch[0] if source_batch else None,
+                    exc,
+                )
+                errors += len(source_batch)
+
+        return written, latest, errors
 
     def _sync_observation_batch(
         self,
@@ -203,7 +269,13 @@ class SyncService:
         written = 0
         latest_updates = 0
 
-        for row in observation_rows:
+        sorted_rows = sorted(
+            observation_rows,
+            key=lambda row: _ensure_utc(_parse_reference_time(row.get("referenceTime")))
+            or datetime.min.replace(tzinfo=timezone.utc),
+        )
+
+        for row in sorted_rows:
             source_id = _normalize_source_id(row.get("sourceId"))
             station = stations_by_source.get(source_id)
             if station is None:
@@ -230,6 +302,14 @@ class SyncService:
                 if not element_id:
                     continue
 
+                quality_code = _extract_quality_code(item.get("qualityCode"))
+                if quality_code is not None and quality_code >= 5:
+                    continue
+
+                normalized_value = _normalize_observation_value(element_id, item.get("value"))
+                if normalized_value is None and element_id in SNOW_DEPTH_ELEMENT_IDS:
+                    continue
+
                 existing = self.session.execute(
                     select(Observation).where(
                         Observation.station_id == station.id,
@@ -248,53 +328,126 @@ class SyncService:
                     self.session.add(existing)
                     written += 1
 
-                existing.value = item.get("value")
+                existing.value = normalized_value
                 existing.unit = item.get("unit")
                 existing.time_offset = item.get("timeOffset")
                 existing.level = _format_level(item.get("level"))
-                existing.quality_code = _extract_quality_code(item.get("qualityCode"))
+                existing.quality_code = quality_code
                 existing.fetched_at = now
 
-                if _apply_latest_observation(latest, reference_time, item):
+                normalized_item = dict(item)
+                normalized_item["value"] = normalized_value
+                normalized_item["qualityCode"] = quality_code
+
+                if _apply_latest_observation(latest, reference_time, normalized_item):
                     has_latest_change = True
 
             if has_latest_change:
-                self._refresh_precipitation_24h(latest, station.id)
+                self._refresh_latest_window_metrics(latest, station.id)
                 latest.updated_at = now
                 station.last_observation_time = latest.observed_at
                 latest_updates += 1
 
         return written, latest_updates
 
-    def _refresh_precipitation_24h(self, latest: StationLatest, station_id: int) -> None:
+    def _refresh_latest_window_metrics(self, latest: StationLatest, station_id: int) -> None:
         observed_at = _ensure_utc(latest.observed_at)
         if observed_at is None:
-            latest.precipitation_24h = None
-            latest.precipitation_24h_unit = None
+            _reset_window_metrics(latest)
             return
 
         window_start = observed_at - timedelta(hours=24)
-        total = self.session.execute(
+        rows = (
+            self.session.execute(
+                select(Observation).where(
+                    Observation.station_id == station_id,
+                    Observation.reference_time > window_start,
+                    Observation.reference_time <= observed_at,
+                    Observation.element_id.in_(
+                        [
+                            PRECIPITATION_ELEMENT,
+                            AIR_TEMPERATURE_ELEMENT,
+                            *sorted(SNOW_DEPTH_ELEMENT_IDS),
+                            WIND_SPEED_ELEMENT,
+                            WIND_DIRECTION_ELEMENT,
+                        ]
+                    ),
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        precipitation_rows = sorted(
+            [row for row in rows if row.element_id == PRECIPITATION_ELEMENT and row.value is not None],
+            key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
+        )
+        temperature_rows = [row for row in rows if row.element_id == AIR_TEMPERATURE_ELEMENT and row.value is not None]
+        snow_depth_rows = sorted(
+            [row for row in rows if row.element_id in SNOW_DEPTH_ELEMENT_IDS and row.value is not None],
+            key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
+        )
+        wind_speed_rows = [row for row in rows if row.element_id == WIND_SPEED_ELEMENT and row.value is not None]
+        wind_direction_rows = {
+            _ensure_utc(row.reference_time): row
+            for row in rows
+            if row.element_id == WIND_DIRECTION_ELEMENT and row.value is not None
+        }
+
+        precipitation_total = self.session.execute(
             select(func.sum(Observation.value)).where(
                 Observation.station_id == station_id,
-                Observation.element_id == "sum(precipitation_amount PT1H)",
+                Observation.element_id == PRECIPITATION_ELEMENT,
                 Observation.reference_time > window_start,
                 Observation.reference_time <= observed_at,
             )
         ).scalar_one()
 
-        latest.precipitation_24h = float(total) if total is not None else None
-        latest.precipitation_24h_unit = latest.precipitation_1h_unit if total is not None else None
+        latest.precipitation_24h = float(precipitation_total) if precipitation_total is not None else None
+        latest.precipitation_24h_unit = _first_unit(precipitation_rows)
+        latest.precipitation_1h_max = _max_value(precipitation_rows)
+        latest.precipitation_1h_max_unit = _first_unit(precipitation_rows)
+        latest.precipitation_3h = _rolling_sum_for_window(precipitation_rows, observed_at, hours=3)
+        latest.precipitation_3h_unit = _first_unit(precipitation_rows) if latest.precipitation_3h is not None else None
+        latest.precipitation_3h_max = _max_rolling_sum(precipitation_rows, hours=3)
+        latest.precipitation_3h_max_unit = _first_unit(precipitation_rows) if latest.precipitation_3h_max is not None else None
+
+        latest.air_temperature_min = _min_value(temperature_rows)
+        latest.air_temperature_min_unit = _first_unit(temperature_rows)
+        latest.air_temperature_max = _max_value(temperature_rows)
+        latest.air_temperature_max_unit = _first_unit(temperature_rows)
+
+        latest.snow_depth_change = _snow_depth_change(snow_depth_rows)
+        latest.snow_depth_change_unit = _first_unit(snow_depth_rows) if latest.snow_depth_change is not None else None
+
+        wind_speed_max_row = _max_row(wind_speed_rows)
+        if wind_speed_max_row is None:
+            latest.wind_speed_max = None
+            latest.wind_speed_max_unit = None
+            latest.wind_from_direction_max = None
+            latest.wind_from_direction_max_unit = None
+        else:
+            latest.wind_speed_max = wind_speed_max_row.value
+            latest.wind_speed_max_unit = wind_speed_max_row.unit
+            direction_row = wind_direction_rows.get(_ensure_utc(wind_speed_max_row.reference_time))
+            latest.wind_from_direction_max = direction_row.value if direction_row else None
+            latest.wind_from_direction_max_unit = direction_row.unit if direction_row else None
 
     def _prune_old_observations(self, retention_days: int) -> int:
         if retention_days <= 0:
-            return 0
+            deleted_bad_quality = self.session.execute(
+                delete(Observation).where(Observation.quality_code >= 5)
+            )
+            return deleted_bad_quality.rowcount or 0
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-        result = self.session.execute(
+        result_old = self.session.execute(
             delete(Observation).where(Observation.reference_time < cutoff)
         )
-        return result.rowcount or 0
+        result_bad_quality = self.session.execute(
+            delete(Observation).where(Observation.quality_code >= 5)
+        )
+        return (result_old.rowcount or 0) + (result_bad_quality.rowcount or 0)
 
 
 def _apply_latest_observation(latest: StationLatest, reference_time: datetime, item: dict) -> bool:
@@ -354,3 +507,109 @@ def _extract_quality_code(value: int | str | None) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _reset_window_metrics(latest: StationLatest) -> None:
+    latest.precipitation_1h_max = None
+    latest.precipitation_1h_max_unit = None
+    latest.precipitation_3h = None
+    latest.precipitation_3h_unit = None
+    latest.precipitation_3h_max = None
+    latest.precipitation_3h_max_unit = None
+    latest.precipitation_24h = None
+    latest.precipitation_24h_unit = None
+    latest.air_temperature_min = None
+    latest.air_temperature_min_unit = None
+    latest.air_temperature_max = None
+    latest.air_temperature_max_unit = None
+    latest.snow_depth_change = None
+    latest.snow_depth_change_unit = None
+    latest.wind_speed_max = None
+    latest.wind_speed_max_unit = None
+    latest.wind_from_direction_max = None
+    latest.wind_from_direction_max_unit = None
+
+
+def _first_unit(rows: list[Observation]) -> str | None:
+    for row in rows:
+        if row.unit:
+            return row.unit
+    return None
+
+
+def _max_value(rows: list[Observation]) -> float | None:
+    values = [row.value for row in rows if row.value is not None]
+    return max(values) if values else None
+
+
+def _min_value(rows: list[Observation]) -> float | None:
+    values = [row.value for row in rows if row.value is not None]
+    return min(values) if values else None
+
+
+def _max_row(rows: list[Observation]) -> Observation | None:
+    filtered = [row for row in rows if row.value is not None]
+    if not filtered:
+        return None
+    return max(
+        filtered,
+        key=lambda row: (
+            row.value,
+            _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
+        ),
+    )
+
+
+def _rolling_sum_for_window(rows: list[Observation], window_end: datetime, hours: int) -> float | None:
+    window_start = window_end - timedelta(hours=hours)
+    values = [
+        row.value
+        for row in rows
+        if row.value is not None
+        and (_ensure_utc(row.reference_time) or window_end) > window_start
+        and (_ensure_utc(row.reference_time) or window_end) <= window_end
+    ]
+    return float(sum(values)) if values else None
+
+
+def _max_rolling_sum(rows: list[Observation], hours: int) -> float | None:
+    if not rows:
+        return None
+    max_sum: float | None = None
+    for row in rows:
+        row_time = _ensure_utc(row.reference_time)
+        if row_time is None:
+            continue
+        rolling_sum = _rolling_sum_for_window(rows, row_time, hours)
+        if rolling_sum is None:
+            continue
+        if max_sum is None or rolling_sum > max_sum:
+            max_sum = rolling_sum
+    return max_sum
+
+
+def _snow_depth_change(rows: list[Observation]) -> float | None:
+    if len(rows) < 2:
+        return None
+    first_row = rows[0]
+    last_row = rows[-1]
+    if first_row.value is None or last_row.value is None:
+        return None
+    return last_row.value - first_row.value
+
+
+def _normalize_observation_value(element_id: str, value: float | int | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if element_id in SNOW_DEPTH_ELEMENT_IDS:
+        if numeric_value == -1:
+            return 0.0
+        if numeric_value <= -3:
+            return None
+
+    return numeric_value

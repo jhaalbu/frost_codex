@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
@@ -11,6 +11,7 @@ from requests import HTTPError
 TARGET_ELEMENTS = [
     "air_temperature",
     "sum(precipitation_amount PT1H)",
+    "surface_snow_thickness",
     "snow_depth",
     "wind_from_direction",
     "wind_speed",
@@ -32,9 +33,16 @@ class FrostSource:
 
 
 class FrostClient:
-    def __init__(self, base_url: str, client_id: str, timeout_seconds: int = 60) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        client_id: str,
+        timeout_seconds: int = 60,
+        acceptable_quality_codes: str = "0,1,2,3,4",
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.acceptable_quality_codes = acceptable_quality_codes
         self.session = requests.Session()
         self.session.auth = (client_id, "")
 
@@ -102,11 +110,42 @@ class FrostClient:
                 "sources": source_value,
                 "referencetime": "latest",
                 "elements": ",".join(TARGET_ELEMENTS),
+                "qualities": self.acceptable_quality_codes,
                 "timeoffsets": "default",
                 "levels": "default",
             },
         )
         return data
+
+    def fetch_snow_series_ids(self, source_ids: list[str], lookback_days: int) -> list[str]:
+        referencetime = _recent_range(lookback_days)
+        data = self._get(
+            "/observations/availableTimeSeries/v0.jsonld",
+            {
+                "sources": ",".join(source_ids),
+                "referencetime": referencetime,
+                "elements": "surface_snow_thickness",
+                "timeresolutions": "P1D",
+                "timeoffsets": "PT6H",
+                "levels": "default",
+            },
+        )
+        return sorted({item["sourceId"] for item in data if item.get("sourceId")})
+
+    def fetch_recent_snow_observations(self, series_ids: list[str], lookback_days: int) -> list[dict[str, Any]]:
+        if not series_ids:
+            return []
+        return self._get(
+            "/observations/v0.jsonld",
+            {
+                "sources": ",".join(series_ids),
+                "referencetime": _recent_range(lookback_days),
+                "elements": "surface_snow_thickness",
+                "timeresolutions": "P1D",
+                "timeoffsets": "PT6H",
+                "qualities": self.acceptable_quality_codes,
+            },
+        )
 
     def _source_query_params(self, element_id: str | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {
@@ -142,3 +181,9 @@ def _get_coordinate(coordinates: list[Any], index: int) -> float | None:
         return float(coordinates[index])
     except (IndexError, TypeError, ValueError):
         return None
+
+
+def _recent_range(days: int) -> str:
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    return f"{start.isoformat().replace('+00:00', 'Z')}/{end.isoformat().replace('+00:00', 'Z')}"

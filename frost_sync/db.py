@@ -31,13 +31,30 @@ def upgrade_schema(database_url: str) -> None:
     columns = {column["name"] for column in inspector.get_columns("station_latest")}
     ddl_statements: list[str] = []
 
-    if "precipitation_24h" not in columns:
-        ddl_statements.append("ALTER TABLE station_latest ADD COLUMN precipitation_24h FLOAT")
-    if "precipitation_24h_unit" not in columns:
-        ddl_statements.append("ALTER TABLE station_latest ADD COLUMN precipitation_24h_unit VARCHAR(64)")
+    expected_columns = {
+        "air_temperature_min": "FLOAT",
+        "air_temperature_min_unit": "VARCHAR(64)",
+        "air_temperature_max": "FLOAT",
+        "air_temperature_max_unit": "VARCHAR(64)",
+        "precipitation_1h_max": "FLOAT",
+        "precipitation_1h_max_unit": "VARCHAR(64)",
+        "precipitation_3h": "FLOAT",
+        "precipitation_3h_unit": "VARCHAR(64)",
+        "precipitation_3h_max": "FLOAT",
+        "precipitation_3h_max_unit": "VARCHAR(64)",
+        "precipitation_24h": "FLOAT",
+        "precipitation_24h_unit": "VARCHAR(64)",
+        "snow_depth_change": "FLOAT",
+        "snow_depth_change_unit": "VARCHAR(64)",
+        "wind_speed_max": "FLOAT",
+        "wind_speed_max_unit": "VARCHAR(64)",
+        "wind_from_direction_max": "FLOAT",
+        "wind_from_direction_max_unit": "VARCHAR(64)",
+    }
 
-    if not ddl_statements:
-        return
+    for column_name, column_type in expected_columns.items():
+        if column_name not in columns:
+            ddl_statements.append(f"ALTER TABLE station_latest ADD COLUMN {column_name} {column_type}")
 
     with engine.begin() as connection:
         for ddl in ddl_statements:

@@ -15,6 +15,7 @@ CAPABILITY_FLAG_MAP = {
     "air_temperature": "has_air_temperature",
     "sum(precipitation_amount PT1H)": "has_precipitation_1h",
     "snow_depth": "has_snow_depth",
+    "surface_snow_thickness": "has_snow_depth",
     "wind_from_direction": "has_wind_from_direction",
     "wind_speed": "has_wind_speed",
 }
@@ -56,7 +57,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                 continue
 
             capability_flags = capabilities.get(station.id, {})
-            if has_filter and not capability_flags.get(_capability_flag_name(has_filter), False):
+            if has_filter and not _matches_has_filter(has_filter, capability_flags, latest):
                 continue
 
             features.append(
@@ -264,6 +265,17 @@ def _capability_flag_name(element_id: str) -> str:
     return alias_map.get(element_id, "")
 
 
+def _matches_has_filter(has_filter: str, capability_flags: dict[str, bool], latest: StationLatest) -> bool:
+    flag_name = _capability_flag_name(has_filter)
+    if not flag_name:
+        return False
+
+    if flag_name == "has_snow_depth":
+        return capability_flags.get(flag_name, False) and latest.snow_depth is not None
+
+    return capability_flags.get(flag_name, False)
+
+
 def _station_properties(station: Station) -> dict[str, Any]:
     return {
         "source_id": station.source_id,
@@ -286,16 +298,32 @@ def _latest_properties(latest: StationLatest) -> dict[str, Any]:
         "observed_at": _isoformat(latest.observed_at),
         "air_temperature": latest.air_temperature,
         "air_temperature_unit": latest.air_temperature_unit,
+        "air_temperature_min": latest.air_temperature_min,
+        "air_temperature_min_unit": latest.air_temperature_min_unit,
+        "air_temperature_max": latest.air_temperature_max,
+        "air_temperature_max_unit": latest.air_temperature_max_unit,
         "precipitation_1h": latest.precipitation_1h,
         "precipitation_1h_unit": latest.precipitation_1h_unit,
+        "precipitation_1h_max": latest.precipitation_1h_max,
+        "precipitation_1h_max_unit": latest.precipitation_1h_max_unit,
+        "precipitation_3h": latest.precipitation_3h,
+        "precipitation_3h_unit": latest.precipitation_3h_unit,
+        "precipitation_3h_max": latest.precipitation_3h_max,
+        "precipitation_3h_max_unit": latest.precipitation_3h_max_unit,
         "precipitation_24h": latest.precipitation_24h,
         "precipitation_24h_unit": latest.precipitation_24h_unit,
         "snow_depth": latest.snow_depth,
         "snow_depth_unit": latest.snow_depth_unit,
+        "snow_depth_change": latest.snow_depth_change,
+        "snow_depth_change_unit": latest.snow_depth_change_unit,
         "wind_from_direction": latest.wind_from_direction,
         "wind_from_direction_unit": latest.wind_from_direction_unit,
+        "wind_from_direction_max": latest.wind_from_direction_max,
+        "wind_from_direction_max_unit": latest.wind_from_direction_max_unit,
         "wind_speed": latest.wind_speed,
         "wind_speed_unit": latest.wind_speed_unit,
+        "wind_speed_max": latest.wind_speed_max,
+        "wind_speed_max_unit": latest.wind_speed_max_unit,
         "updated_at": _isoformat(latest.updated_at),
     }
 

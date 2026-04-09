@@ -39,6 +39,7 @@ def main() -> None:
             base_url=settings.frost_base_url,
             client_id=require_frost_client_id(settings),
             timeout_seconds=settings.request_timeout_seconds,
+            acceptable_quality_codes=settings.acceptable_quality_codes,
         )
 
         with session_factory() as session:
