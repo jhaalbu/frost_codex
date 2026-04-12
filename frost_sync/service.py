@@ -405,17 +405,23 @@ class SyncService:
 
         latest.precipitation_24h = float(precipitation_total) if precipitation_total is not None else None
         latest.precipitation_24h_unit = _first_unit(precipitation_rows)
-        latest.precipitation_1h_max = _max_value(precipitation_rows)
+        precipitation_1h_max_row = _max_row(precipitation_rows)
+        latest.precipitation_1h_max = precipitation_1h_max_row.value if precipitation_1h_max_row else None
         latest.precipitation_1h_max_unit = _first_unit(precipitation_rows)
+        latest.precipitation_1h_max_period = _observation_period(precipitation_1h_max_row, hours=1)
         latest.precipitation_3h = _rolling_sum_for_window(precipitation_rows, observed_at, hours=3)
         latest.precipitation_3h_unit = _first_unit(precipitation_rows) if latest.precipitation_3h is not None else None
-        latest.precipitation_3h_max = _max_rolling_sum(precipitation_rows, hours=3)
+        precipitation_3h_max_value, precipitation_3h_max_end = _max_rolling_sum_with_end(rows=precipitation_rows, hours=3)
+        latest.precipitation_3h_max = precipitation_3h_max_value
         latest.precipitation_3h_max_unit = _first_unit(precipitation_rows) if latest.precipitation_3h_max is not None else None
+        latest.precipitation_3h_max_period = _window_period(precipitation_3h_max_end, hours=3)
 
         latest.air_temperature_min = _min_value(temperature_rows)
         latest.air_temperature_min_unit = _first_unit(temperature_rows)
-        latest.air_temperature_max = _max_value(temperature_rows)
+        air_temperature_max_row = _max_row(temperature_rows)
+        latest.air_temperature_max = air_temperature_max_row.value if air_temperature_max_row else None
         latest.air_temperature_max_unit = _first_unit(temperature_rows)
+        latest.air_temperature_max_time = _instant_time(air_temperature_max_row)
 
         latest.snow_depth_change = _snow_depth_change(snow_depth_rows)
         latest.snow_depth_change_unit = _first_unit(snow_depth_rows) if latest.snow_depth_change is not None else None
@@ -424,11 +430,13 @@ class SyncService:
         if wind_speed_max_row is None:
             latest.wind_speed_max = None
             latest.wind_speed_max_unit = None
+            latest.wind_speed_max_time = None
             latest.wind_from_direction_max = None
             latest.wind_from_direction_max_unit = None
         else:
             latest.wind_speed_max = wind_speed_max_row.value
             latest.wind_speed_max_unit = wind_speed_max_row.unit
+            latest.wind_speed_max_time = _instant_time(wind_speed_max_row)
             direction_row = wind_direction_rows.get(_ensure_utc(wind_speed_max_row.reference_time))
             latest.wind_from_direction_max = direction_row.value if direction_row else None
             latest.wind_from_direction_max_unit = direction_row.unit if direction_row else None
@@ -522,12 +530,16 @@ def _reset_window_metrics(latest: StationLatest) -> None:
     latest.air_temperature_min_unit = None
     latest.air_temperature_max = None
     latest.air_temperature_max_unit = None
+    latest.air_temperature_max_time = None
     latest.snow_depth_change = None
     latest.snow_depth_change_unit = None
     latest.wind_speed_max = None
     latest.wind_speed_max_unit = None
+    latest.wind_speed_max_time = None
     latest.wind_from_direction_max = None
     latest.wind_from_direction_max_unit = None
+    latest.precipitation_1h_max_period = None
+    latest.precipitation_3h_max_period = None
 
 
 def _first_unit(rows: list[Observation]) -> str | None:
@@ -573,9 +585,15 @@ def _rolling_sum_for_window(rows: list[Observation], window_end: datetime, hours
 
 
 def _max_rolling_sum(rows: list[Observation], hours: int) -> float | None:
+    value, _ = _max_rolling_sum_with_end(rows, hours)
+    return value
+
+
+def _max_rolling_sum_with_end(rows: list[Observation], hours: int) -> tuple[float | None, datetime | None]:
     if not rows:
-        return None
+        return None, None
     max_sum: float | None = None
+    max_end: datetime | None = None
     for row in rows:
         row_time = _ensure_utc(row.reference_time)
         if row_time is None:
@@ -585,7 +603,8 @@ def _max_rolling_sum(rows: list[Observation], hours: int) -> float | None:
             continue
         if max_sum is None or rolling_sum > max_sum:
             max_sum = rolling_sum
-    return max_sum
+            max_end = row_time
+    return max_sum, max_end
 
 
 def _snow_depth_change(rows: list[Observation]) -> float | None:
@@ -613,3 +632,31 @@ def _normalize_observation_value(element_id: str, value: float | int | None) -> 
             return None
 
     return numeric_value
+
+
+def _instant_time(row: Observation | None) -> str | None:
+    if row is None:
+        return None
+    return _isoformat_utc(_ensure_utc(row.reference_time))
+
+
+def _observation_period(row: Observation | None, hours: int) -> str | None:
+    if row is None:
+        return None
+    end = _ensure_utc(row.reference_time)
+    return _window_period(end, hours)
+
+
+def _window_period(window_end: datetime | None, hours: int) -> str | None:
+    end = _ensure_utc(window_end)
+    if end is None:
+        return None
+    start = end - timedelta(hours=hours)
+    return f"{_isoformat_utc(start)}/{_isoformat_utc(end)}"
+
+
+def _isoformat_utc(value: datetime | None) -> str | None:
+    value = _ensure_utc(value)
+    if value is None:
+        return None
+    return value.isoformat().replace("+00:00", "Z")
