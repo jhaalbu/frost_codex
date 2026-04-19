@@ -25,11 +25,20 @@ def upgrade_schema(database_url: str) -> None:
     engine = create_engine(database_url, future=True, **_engine_kwargs(database_url))
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
+    ddl_statements: list[str] = []
+
+    if "stations" in tables:
+        station_columns = {column["name"] for column in inspector.get_columns("stations")}
+        if "stationholder" not in station_columns:
+            ddl_statements.append("ALTER TABLE stations ADD COLUMN stationholder VARCHAR(512)")
+
     if "station_latest" not in tables:
+        with engine.begin() as connection:
+            for ddl in ddl_statements:
+                connection.execute(text(ddl))
         return
 
     columns = {column["name"] for column in inspector.get_columns("station_latest")}
-    ddl_statements: list[str] = []
 
     expected_columns = {
         "air_temperature_min": "FLOAT",

@@ -280,6 +280,7 @@ def _station_properties(station: Station) -> dict[str, Any]:
     return {
         "source_id": station.source_id,
         "name": station.name,
+        "stationholder": station.stationholder,
         "country": station.country,
         "county": station.county,
         "municipality": station.municipality,

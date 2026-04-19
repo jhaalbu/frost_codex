@@ -10,6 +10,7 @@ The local development setup uses SQLite by default. The code is structured so th
 - `station_capabilities`: which requested Frost elements each station exposes
 - `observations`: history table with one row per element and timestamp
 - `station_latest`: one row per station with latest values for map display, including rolling precipitation for the last 24 hours
+- `stations.stationholder`: the Frost station holder, exposed as `stationholder` in GeoJSON
 
 ## Quick start
 
@@ -150,3 +151,4 @@ mysql+pymysql://yourusername:your-mysql-password@your-mysql-host/yourusername$we
 - `app.py` expects `FROST_CLIENT_ID` in environment variables or `.env`; the key is no longer hardcoded in source.
 - `FROST_RETENTION_DAYS=14` prunes old rows from `observations` while keeping `station_latest` available for map display.
 - Re-running `python -m frost_sync init-db` is safe and will add newer `station_latest` columns like `precipitation_24h` when needed.
+- For stations held by SVV/Statens vegvesen, hourly precipitation is excluded from latest and rolling precipitation metrics when temperature is below 1 degC, wind speed is above 5 m/s, and the hourly precipitation value is above 5 mm.

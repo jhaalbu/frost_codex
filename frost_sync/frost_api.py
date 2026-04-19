@@ -22,6 +22,7 @@ TARGET_ELEMENTS = [
 class FrostSource:
     source_id: str
     name: str | None
+    stationholder: str | None
     country: str | None
     county: str | None
     municipality: str | None
@@ -78,6 +79,7 @@ class FrostClient:
                 FrostSource(
                     source_id=item["id"],
                     name=item.get("name"),
+                    stationholder=_format_stationholders(item.get("stationHolders")),
                     country=item.get("country"),
                     county=item.get("county"),
                     municipality=item.get("municipality"),
@@ -155,6 +157,7 @@ class FrostClient:
                 [
                     "id",
                     "name",
+                    "stationHolders",
                     "country",
                     "county",
                     "municipality",
@@ -181,6 +184,16 @@ def _get_coordinate(coordinates: list[Any], index: int) -> float | None:
         return float(coordinates[index])
     except (IndexError, TypeError, ValueError):
         return None
+
+
+def _format_stationholders(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        holders = [str(item).strip() for item in value if str(item).strip()]
+        return ", ".join(holders) if holders else None
+    text = str(value).strip()
+    return text or None
 
 
 def _recent_range(days: int) -> str:
