@@ -42,7 +42,6 @@ class NvdbClient:
         self.session = session or requests.Session()
 
     def fetch_snow_avalanche_events(self, road: str, segment: str, max_pages: int = 10) -> list[AvalancheEvent]:
-        vegsystemreferanse = _build_vegsystemreferanse(road, segment)
         url, params = self._avalanche_request(road, segment)
 
         events: list[AvalancheEvent] = []
@@ -57,17 +56,18 @@ class NvdbClient:
             payload = response.json()
 
             for item in payload.get("objekter", []):
-                properties = _extract_property_map(item.get("egenskaper"))
+                detail = self._fetch_object_detail(item)
+                properties = _extract_property_map(detail.get("egenskaper"))
                 event_type = _match_property(properties, "Type skred")
                 if not _is_snow_avalanche(event_type):
                     continue
 
-                location = item.get("lokasjon") or {}
+                location = detail.get("lokasjon") or {}
                 events.append(
                     AvalancheEvent(
-                        nvdb_id=item.get("id"),
+                        nvdb_id=detail.get("id") or item.get("id"),
                         event_type=event_type,
-                        event_date=_resolve_event_date(item, properties),
+                        event_date=_resolve_event_date(detail, properties),
                         vegsystemreferanse=_resolve_vegsystemreferanse(location),
                         municipality=location.get("kommuner") or [],
                         county=location.get("fylker") or [],
@@ -93,6 +93,9 @@ class NvdbClient:
             response = self.session.get(next_url, params=next_params, timeout=self.timeout_seconds)
             response.raise_for_status()
             payload = response.json()
+            payload["_detailed_objects"] = [
+                self._fetch_object_detail(item) for item in payload.get("objekter", [])
+            ]
             pages.append(payload)
             next_url = ((payload.get("metadata") or {}).get("neste") or {}).get("href")
             next_params = None
@@ -113,11 +116,18 @@ class NvdbClient:
             f"{NVDB_BASE_URL}/vegobjekter/api/v4/vegobjekter/{NVDB_OBJECT_TYPE_AVALANCHE}",
             {
                 "vegsystemreferanse": vegsystemreferanse,
-                "inkluder": "metadata,egenskaper,lokasjon",
-                "antall": 500,
+                "antall": 200,
                 "inkluderAntall": "false",
             },
         )
+
+    def _fetch_object_detail(self, item: dict[str, Any]) -> dict[str, Any]:
+        href = item.get("href")
+        if not href:
+            return item
+        response = self.session.get(href, timeout=self.timeout_seconds)
+        response.raise_for_status()
+        return response.json()
 
 
 class NveGtsClient:
