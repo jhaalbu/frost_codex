@@ -20,7 +20,6 @@ DEFAULT_GTS_THEMES = [
     "sd",
     "fsw",
     "sdfsw3d",
-    "additional_snow_depth",
     "windSpeed10m3h",
     "windDirection10m3h",
     "qswenergy3h",
@@ -173,12 +172,21 @@ class NveGtsClient:
         start_date: date,
         end_date: date,
         themes: list[str] | None = None,
-    ) -> dict[str, dict[str, Any]]:
+    ) -> tuple[dict[str, dict[str, Any]], list[dict[str, str]]]:
         results: dict[str, dict[str, Any]] = {}
+        skipped: list[dict[str, str]] = []
         for theme in themes or DEFAULT_GTS_THEMES:
             url = f"{NVE_GTS_BASE_URL}/GridTimeSeries/{x}/{y}/{start_date.isoformat()}/{end_date.isoformat()}/{theme}.json"
             response = self.session.get(url, timeout=self.timeout_seconds)
-            response.raise_for_status()
+            if response.status_code >= 400:
+                skipped.append(
+                    {
+                        "theme": theme,
+                        "status": str(response.status_code),
+                        "details": response.text.strip()[:300],
+                    }
+                )
+                continue
             payload = response.json()
             latest_value = _latest_gts_value(payload)
             if latest_value is None:
@@ -189,7 +197,7 @@ class NveGtsClient:
                 "time_resolution": payload.get("TimeResolution"),
                 "full_name": payload.get("FullName"),
             }
-        return results
+        return results, skipped
 
 
 def build_avalanche_risk_payload(
@@ -199,6 +207,7 @@ def build_avalanche_risk_payload(
     road: str,
     segment: str,
     gts_data: dict[str, dict[str, Any]] | None = None,
+    gts_skipped_themes: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     risk_score = 0
     drivers: list[str] = []
@@ -319,6 +328,7 @@ def build_avalanche_risk_payload(
         },
         "latest_weather": _latest_station_payload(station, latest),
         "gts_weather": gts_data or {},
+        "gts_skipped_themes": gts_skipped_themes or [],
     }
 
 
@@ -464,7 +474,7 @@ def _is_snow_avalanche(value: str | None) -> bool:
     if not value:
         return False
     normalized = value.casefold()
-    return "snø" in normalized or "sno" in normalized
+    return "\u00f8" in normalized or "sno" in normalized
 
 
 def _resolve_event_date(item: dict[str, Any], properties: dict[str, Any]) -> str | None:

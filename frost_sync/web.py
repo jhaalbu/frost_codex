@@ -243,8 +243,9 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
         try:
             events = nvdb_client.fetch_snow_avalanche_events(road=road, segment=segment)
             gts_data = None
+            gts_skipped_themes = []
             if gts_x is not None and gts_y is not None:
-                gts_data = gts_client.fetch_latest_values(
+                gts_data, gts_skipped_themes = gts_client.fetch_latest_values(
                     x=gts_x,
                     y=gts_y,
                     start_date=start_date,
@@ -263,6 +264,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                 road=road,
                 segment=segment,
                 gts_data=gts_data,
+                gts_skipped_themes=gts_skipped_themes,
             )
         )
 
