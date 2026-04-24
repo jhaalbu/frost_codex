@@ -445,11 +445,23 @@ def _resolve_vegsystemreferanse(location: dict[str, Any]) -> str | None:
 
 
 def _build_vegsystemreferanse(road: str, segment: str) -> str:
-    road_normalized = road.strip().upper().replace(" ", "")
-    segment_normalized = segment.strip().upper().replace(" ", "")
+    road_normalized = (
+        road.strip()
+        .upper()
+        .replace(" ", "")
+        .replace(".", "")
+        .replace("-", "")
+    )
+    segment_normalized = (
+        segment.strip()
+        .upper()
+        .replace(" ", "")
+        .replace(".", "")
+        .replace("-", "")
+    )
     if not segment_normalized:
         return road_normalized
-    return f"{road_normalized} {segment_normalized}"
+    return f"{road_normalized}{segment_normalized}"
 
 
 def _latest_gts_value(payload: dict[str, Any]) -> float | None:
