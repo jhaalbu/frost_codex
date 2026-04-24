@@ -7,7 +7,13 @@ import requests
 from flask import Blueprint, Flask, abort, jsonify, request
 from sqlalchemy import and_, select
 
-from frost_sync.avalanche import NveGtsClient, NvdbClient, build_avalanche_risk_payload
+from frost_sync.avalanche import (
+    AvalancheWeatherSnapshot,
+    NveGtsClient,
+    NvdbClient,
+    build_avalanche_risk_payload,
+    summarize_backtest,
+)
 from frost_sync.config import load_settings
 from frost_sync.db import create_session_factory
 from frost_sync.models import Observation, Station, StationCapability, StationLatest
@@ -21,6 +27,12 @@ CAPABILITY_FLAG_MAP = {
     "wind_from_direction": "has_wind_from_direction",
     "wind_speed": "has_wind_speed",
 }
+
+PRECIPITATION_ELEMENT = "sum(precipitation_amount PT1H)"
+AIR_TEMPERATURE_ELEMENT = "air_temperature"
+SNOW_DEPTH_ELEMENT_IDS = {"snow_depth", "surface_snow_thickness"}
+WIND_DIRECTION_ELEMENT = "wind_from_direction"
+WIND_SPEED_ELEMENT = "wind_speed"
 
 
 def create_app() -> Flask:
@@ -224,8 +236,16 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
         gts_y = request.args.get("y", type=int)
         if (gts_x is None) != (gts_y is None):
             abort(400, description="Use both ?x=... and ?y=... for optional NVE GridTimeSeries data")
+        as_of = _parse_optional_timestamp(request.args.get("as_of"))
         start_date = _parse_optional_date(request.args.get("start_date"), default=date.today() - timedelta(days=7))
         end_date = _parse_optional_date(request.args.get("end_date"), default=date.today())
+        if as_of is not None:
+            default_gts_end = as_of.date()
+            default_gts_start = default_gts_end - timedelta(days=7)
+            if "start_date" not in request.args:
+                start_date = default_gts_start
+            if "end_date" not in request.args:
+                end_date = default_gts_end
 
         with session_factory() as session:
             row = (
@@ -239,6 +259,8 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
             if row is None:
                 abort(404, description=f"Unknown station: {station_source_id}")
             station, latest = row
+            if as_of is not None:
+                latest = _load_station_snapshot_as_of(session, station, as_of)
 
         try:
             events = nvdb_client.fetch_snow_avalanche_events(road=road, segment=segment)
@@ -265,6 +287,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                 segment=segment,
                 gts_data=gts_data,
                 gts_skipped_themes=gts_skipped_themes,
+                assessment_time=as_of,
             )
         )
 
@@ -288,6 +311,95 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
             abort(502, description=f"Failed to fetch NVDB avalanche data: {exc}")
 
         return jsonify(payload)
+
+    @blueprint.get("/api/avalanche-risk/backtest")
+    def avalanche_risk_backtest() -> Any:
+        road = (request.args.get("road") or "").strip()
+        segment = (request.args.get("segment") or "").strip()
+        station_source_id = (request.args.get("station") or "").strip()
+        if not road or not segment or not station_source_id:
+            abort(400, description="Use ?road=RV5&segment=S8D1&station=SN55740")
+
+        from_dt = _parse_timestamp(request.args.get("from")) if request.args.get("from") else None
+        to_dt = _parse_timestamp(request.args.get("to")) if request.args.get("to") else None
+        if from_dt is None or to_dt is None:
+            abort(400, description="Use both ?from=... and ?to=... for backtesting")
+        if from_dt > to_dt:
+            abort(400, description="?from must be earlier than or equal to ?to")
+
+        step_hours = request.args.get("step_hours", default=24, type=int)
+        event_window_hours = request.args.get("event_window_hours", default=24, type=int)
+        gts_x = request.args.get("x", type=int)
+        gts_y = request.args.get("y", type=int)
+        if (gts_x is None) != (gts_y is None):
+            abort(400, description="Use both ?x=... and ?y=... for optional NVE GridTimeSeries data")
+        if step_hours < 1 or step_hours > 168:
+            abort(400, description="step_hours must be between 1 and 168")
+        if event_window_hours < 1 or event_window_hours > 168:
+            abort(400, description="event_window_hours must be between 1 and 168")
+
+        with session_factory() as session:
+            row = (
+                session.execute(
+                    select(Station).where(Station.source_id == station_source_id)
+                )
+                .scalar_one_or_none()
+            )
+            if row is None:
+                abort(404, description=f"Unknown station: {station_source_id}")
+            station = row
+
+        try:
+            events = nvdb_client.fetch_snow_avalanche_events(road=road, segment=segment)
+        except requests.RequestException as exc:
+            abort(502, description=f"Failed to fetch NVDB avalanche data: {exc}")
+        except RuntimeError as exc:
+            abort(502, description=str(exc))
+
+        timestamps = list(_time_range(from_dt, to_dt, step_hours))
+        series: list[dict[str, Any]] = []
+        with session_factory() as session:
+            for as_of in timestamps:
+                snapshot = _load_station_snapshot_as_of(session, station, as_of)
+                gts_data = None
+                gts_skipped_themes: list[dict[str, str]] = []
+                if gts_x is not None and gts_y is not None:
+                    try:
+                        gts_data, gts_skipped_themes = gts_client.fetch_latest_values(
+                            x=gts_x,
+                            y=gts_y,
+                            start_date=as_of.date() - timedelta(days=7),
+                            end_date=as_of.date(),
+                        )
+                    except requests.RequestException as exc:
+                        gts_skipped_themes = [{"theme": "all", "status": "request_error", "details": str(exc)}]
+
+                payload = build_avalanche_risk_payload(
+                    station=station,
+                    latest=snapshot,
+                    events=events,
+                    road=road,
+                    segment=segment,
+                    gts_data=gts_data,
+                    gts_skipped_themes=gts_skipped_themes,
+                    assessment_time=as_of,
+                )
+                payload["event_match"] = _has_event_near_timestamp(events, as_of, event_window_hours)
+                series.append(payload)
+
+        return jsonify(
+            {
+                "road": road,
+                "segment": segment,
+                "station": station_source_id,
+                "from": _isoformat(from_dt),
+                "to": _isoformat(to_dt),
+                "step_hours": step_hours,
+                "event_window_hours": event_window_hours,
+                "summary": summarize_backtest(series, events, event_window_hours),
+                "series": series,
+            }
+        )
 
     return blueprint
 
@@ -326,6 +438,101 @@ def _parse_optional_date(value: str | None, default: date) -> date:
         abort(400, description=f"Invalid date: {value}")
 
 
+def _parse_optional_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    return _parse_timestamp(value)
+
+
+def _load_station_snapshot_as_of(
+    session,
+    station: Station,
+    as_of: datetime,
+) -> AvalancheWeatherSnapshot | None:
+    lookback_start = as_of - timedelta(days=14)
+    rows = (
+        session.execute(
+            select(Observation)
+            .where(
+                and_(
+                    Observation.station_id == station.id,
+                    Observation.reference_time >= lookback_start,
+                    Observation.reference_time <= as_of,
+                    Observation.element_id.in_(
+                        [
+                            AIR_TEMPERATURE_ELEMENT,
+                            PRECIPITATION_ELEMENT,
+                            *sorted(SNOW_DEPTH_ELEMENT_IDS),
+                            WIND_DIRECTION_ELEMENT,
+                            WIND_SPEED_ELEMENT,
+                        ]
+                    ),
+                )
+            )
+            .order_by(Observation.reference_time)
+        )
+        .scalars()
+        .all()
+    )
+    if not rows:
+        return None
+
+    latest_by_element = _latest_observation_by_element(rows)
+    rows_24h = [
+        row
+        for row in rows
+        if _ensure_utc(row.reference_time) is not None
+        and _ensure_utc(row.reference_time) > as_of - timedelta(hours=24)
+    ]
+    precipitation_rows = [
+        row for row in rows_24h if row.element_id == PRECIPITATION_ELEMENT and row.value is not None
+    ]
+    temperature_rows = [
+        row for row in rows_24h if row.element_id == AIR_TEMPERATURE_ELEMENT and row.value is not None
+    ]
+    snow_depth_rows = [
+        row for row in rows_24h if row.element_id in SNOW_DEPTH_ELEMENT_IDS and row.value is not None
+    ]
+    wind_speed_rows = [
+        row for row in rows_24h if row.element_id == WIND_SPEED_ELEMENT and row.value is not None
+    ]
+    wind_direction_by_time = {
+        _ensure_utc(row.reference_time): row
+        for row in rows_24h
+        if row.element_id == WIND_DIRECTION_ELEMENT and row.value is not None
+    }
+
+    latest_air = latest_by_element.get(AIR_TEMPERATURE_ELEMENT)
+    latest_precip = latest_by_element.get(PRECIPITATION_ELEMENT)
+    latest_wind_speed = latest_by_element.get(WIND_SPEED_ELEMENT)
+    latest_wind_direction = latest_by_element.get(WIND_DIRECTION_ELEMENT)
+    latest_snow = _latest_snow_row(rows)
+    wind_speed_max_row = _max_observation_row(wind_speed_rows)
+    wind_direction_max = None
+    if wind_speed_max_row is not None:
+        direction_row = wind_direction_by_time.get(_ensure_utc(wind_speed_max_row.reference_time))
+        wind_direction_max = direction_row.value if direction_row else None
+
+    return AvalancheWeatherSnapshot(
+        observed_at=_snapshot_observed_at(
+            latest_air,
+            latest_precip,
+            latest_wind_speed,
+            latest_wind_direction,
+            latest_snow,
+        ),
+        air_temperature=latest_air.value if latest_air else None,
+        precipitation_3h=_rolling_sum_for_window(precipitation_rows, as_of, hours=3),
+        precipitation_24h=_sum_observations(precipitation_rows),
+        snow_depth=latest_snow.value if latest_snow else None,
+        snow_depth_change=_snow_depth_change(snow_depth_rows),
+        wind_speed=latest_wind_speed.value if latest_wind_speed else None,
+        wind_speed_max=wind_speed_max_row.value if wind_speed_max_row else None,
+        wind_from_direction=latest_wind_direction.value if latest_wind_direction else None,
+        wind_from_direction_max=wind_direction_max,
+    )
+
+
 def _load_capabilities(session) -> dict[int, dict[str, bool]]:
     rows = session.execute(select(StationCapability)).scalars().all()
     capabilities: dict[int, dict[str, bool]] = {}
@@ -335,6 +542,119 @@ def _load_capabilities(session) -> dict[int, dict[str, bool]]:
         if flag_name:
             flags[flag_name] = row.available
     return capabilities
+
+
+def _latest_observation_by_element(rows: list[Observation]) -> dict[str, Observation]:
+    latest: dict[str, Observation] = {}
+    for row in rows:
+        current = latest.get(row.element_id)
+        row_time = _ensure_utc(row.reference_time)
+        current_time = _ensure_utc(current.reference_time) if current else None
+        if current is None:
+            latest[row.element_id] = row
+            continue
+        if row_time is not None and (current_time is None or row_time >= current_time):
+            latest[row.element_id] = row
+    return latest
+
+
+def _latest_snow_row(rows: list[Observation]) -> Observation | None:
+    snow_rows = [row for row in rows if row.element_id in SNOW_DEPTH_ELEMENT_IDS and row.value is not None]
+    if not snow_rows:
+        return None
+    snow_rows.sort(key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc))
+    return snow_rows[-1]
+
+
+def _max_observation_row(rows: list[Observation]) -> Observation | None:
+    candidates = [row for row in rows if row.value is not None]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda row: (
+            row.value,
+            _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
+        ),
+    )
+
+
+def _rolling_sum_for_window(rows: list[Observation], window_end: datetime, hours: int) -> float | None:
+    window_start = window_end - timedelta(hours=hours)
+    values = [
+        row.value
+        for row in rows
+        if row.value is not None
+        and (_ensure_utc(row.reference_time) or window_end) > window_start
+        and (_ensure_utc(row.reference_time) or window_end) <= window_end
+    ]
+    return float(sum(values)) if values else None
+
+
+def _sum_observations(rows: list[Observation]) -> float | None:
+    values = [row.value for row in rows if row.value is not None]
+    return float(sum(values)) if values else None
+
+
+def _snow_depth_change(rows: list[Observation]) -> float | None:
+    if len(rows) < 2:
+        return None
+    ordered = sorted(
+        rows,
+        key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    first_row = ordered[0]
+    last_row = ordered[-1]
+    if first_row.value is None or last_row.value is None:
+        return None
+    return last_row.value - first_row.value
+
+
+def _snapshot_observed_at(*rows: Observation | None) -> datetime | None:
+    timestamps = [_ensure_utc(row.reference_time) for row in rows if row is not None]
+    if not timestamps:
+        return None
+    return max(timestamps)
+
+
+def _time_range(start: datetime, end: datetime, step_hours: int) -> list[datetime]:
+    values: list[datetime] = []
+    current = start
+    while current <= end:
+        values.append(current)
+        current = current + timedelta(hours=step_hours)
+    return values
+
+
+def _has_event_near_timestamp(events, as_of: datetime, event_window_hours: int) -> bool:
+    event_window = timedelta(hours=event_window_hours)
+    as_of_date = as_of.date()
+    for event in events:
+        event_date = _parse_event_date(event.event_date)
+        if event_date is None:
+            continue
+        event_dt = datetime.combine(event_date, time.min, tzinfo=timezone.utc)
+        if abs(event_dt - as_of) <= event_window:
+            return True
+        if event_date == as_of_date:
+            return True
+    return False
+
+
+def _parse_event_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    candidate = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(candidate).date()
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%Y %H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def _empty_capability_flags() -> dict[str, bool]:
@@ -426,6 +746,13 @@ def _latest_properties(latest: StationLatest) -> dict[str, Any]:
 def _isoformat(value: datetime | None) -> str | None:
     if value is None:
         return None
+    value = _ensure_utc(value)
+    return value.isoformat().replace("+00:00", "Z") if value else None
+
+
+def _ensure_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)

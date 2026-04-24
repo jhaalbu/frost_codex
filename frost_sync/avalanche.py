@@ -37,6 +37,20 @@ class AvalancheEvent:
     properties: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class AvalancheWeatherSnapshot:
+    observed_at: datetime | None
+    air_temperature: float | None
+    precipitation_3h: float | None
+    precipitation_24h: float | None
+    snow_depth: float | None
+    snow_depth_change: float | None
+    wind_speed: float | None
+    wind_speed_max: float | None
+    wind_from_direction: float | None
+    wind_from_direction_max: float | None
+
+
 class NvdbClient:
     def __init__(self, timeout_seconds: int = 60, session: requests.Session | None = None) -> None:
         self.timeout_seconds = timeout_seconds
@@ -202,12 +216,13 @@ class NveGtsClient:
 
 def build_avalanche_risk_payload(
     station: Station,
-    latest: StationLatest | None,
+    latest: StationLatest | AvalancheWeatherSnapshot | None,
     events: list[AvalancheEvent],
     road: str,
     segment: str,
     gts_data: dict[str, dict[str, Any]] | None = None,
     gts_skipped_themes: list[dict[str, str]] | None = None,
+    assessment_time: datetime | None = None,
 ) -> dict[str, Any]:
     risk_score = 0
     drivers: list[str] = []
@@ -306,7 +321,7 @@ def build_avalanche_risk_payload(
         "segment": segment,
         "station": station.source_id,
         "station_name": station.name,
-        "assessment_time": _isoformat_utc(datetime.now(timezone.utc)),
+        "assessment_time": _isoformat_utc(assessment_time or datetime.now(timezone.utc)),
         "risk_score": risk_score,
         "risk_level": _risk_level(risk_score),
         "drivers": drivers,
@@ -332,7 +347,33 @@ def build_avalanche_risk_payload(
     }
 
 
-def _latest_station_payload(station: Station, latest: StationLatest | None) -> dict[str, Any]:
+def summarize_backtest(
+    series: list[dict[str, Any]],
+    events: list[AvalancheEvent],
+    event_window_hours: int,
+) -> dict[str, Any]:
+    event_dates = [
+        parsed
+        for event in events
+        if (parsed := _parse_date(event.event_date)) is not None
+    ]
+    high_count = sum(1 for item in series if item.get("risk_level") in {"high", "very_high"})
+    medium_or_higher_count = sum(1 for item in series if item.get("risk_level") in {"medium", "high", "very_high"})
+    hits = sum(1 for item in series if item.get("event_match"))
+    return {
+        "event_window_hours": event_window_hours,
+        "series_count": len(series),
+        "historical_event_count": len(event_dates),
+        "high_or_above_count": high_count,
+        "medium_or_above_count": medium_or_higher_count,
+        "matched_event_windows": hits,
+    }
+
+
+def _latest_station_payload(
+    station: Station,
+    latest: StationLatest | AvalancheWeatherSnapshot | None,
+) -> dict[str, Any]:
     payload = {
         "source_id": station.source_id,
         "name": station.name,

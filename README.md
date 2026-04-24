@@ -67,11 +67,13 @@ flask --app app run --host 127.0.0.1 --port 5000
 - `GET /api/stations/SN18700/observations?date=2026-04-03`
 - `GET /api/avalanche-risk?road=RV5&segment=S8D1&station=SN55740`
 - `GET /api/avalanche-risk?road=RV5&segment=S8D1&station=SN55740&x=131513&y=6843342`
+- `GET /api/avalanche-risk?road=RV5&segment=S8D1&station=SN55740&as_of=2024-02-10T06:00:00Z`
+- `GET /api/avalanche-risk/backtest?road=RV5&segment=S8D1&station=SN55740&from=2024-02-01T00:00:00Z&to=2024-02-15T00:00:00Z`
 - `GET /api/avalanche-risk/debug/nvdb?road=RV5&segment=S8D1`
 
 The `latest.geojson` endpoint is the best starting point for ArcGIS map display because it returns one feature per station with the latest values already flattened into fields.
 It includes both `precipitation_1h` and rolling `precipitation_24h`.
-The `avalanche-risk` endpoint is an experimental, explainable risk score that combines NVDB avalanche history for object type `445`, latest station data from the local database, and optional NVE GridTimeSeries values when `x` and `y` are provided.
+The `avalanche-risk` endpoint is an experimental, explainable risk score that combines NVDB avalanche history for object type `445`, station data from the local database, and optional NVE GridTimeSeries values when `x` and `y` are provided. Use `as_of=...` to backtest the score for a historical timestamp based on stored observations.
 
 ## Reuse inside an existing Flask app
 
