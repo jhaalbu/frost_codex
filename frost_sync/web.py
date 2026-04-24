@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
+import requests
 from flask import Blueprint, Flask, abort, jsonify, request
 from sqlalchemy import and_, select
 
+from frost_sync.avalanche import NveGtsClient, NvdbClient, build_avalanche_risk_payload
 from frost_sync.config import load_settings
 from frost_sync.db import create_session_factory
 from frost_sync.models import Observation, Station, StationCapability, StationLatest
@@ -30,6 +32,8 @@ def create_app() -> Flask:
 def create_blueprint(name: str = "frost_sync") -> Blueprint:
     settings = load_settings()
     session_factory = create_session_factory(settings.database_url)
+    nvdb_client = NvdbClient(timeout_seconds=settings.request_timeout_seconds)
+    gts_client = NveGtsClient(timeout_seconds=settings.request_timeout_seconds)
     blueprint = Blueprint(name, __name__)
 
     @blueprint.get("/health")
@@ -208,6 +212,81 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
             }
         )
 
+    @blueprint.get("/api/avalanche-risk")
+    def avalanche_risk() -> Any:
+        road = (request.args.get("road") or "").strip()
+        segment = (request.args.get("segment") or "").strip()
+        station_source_id = (request.args.get("station") or "").strip()
+        if not road or not segment or not station_source_id:
+            abort(400, description="Use ?road=RV5&segment=S8D1&station=SN55740")
+
+        gts_x = request.args.get("x", type=int)
+        gts_y = request.args.get("y", type=int)
+        if (gts_x is None) != (gts_y is None):
+            abort(400, description="Use both ?x=... and ?y=... for optional NVE GridTimeSeries data")
+        start_date = _parse_optional_date(request.args.get("start_date"), default=date.today() - timedelta(days=7))
+        end_date = _parse_optional_date(request.args.get("end_date"), default=date.today())
+
+        with session_factory() as session:
+            row = (
+                session.execute(
+                    select(Station, StationLatest)
+                    .outerjoin(StationLatest, StationLatest.station_id == Station.id)
+                    .where(Station.source_id == station_source_id)
+                )
+                .one_or_none()
+            )
+            if row is None:
+                abort(404, description=f"Unknown station: {station_source_id}")
+            station, latest = row
+
+        try:
+            events = nvdb_client.fetch_snow_avalanche_events(road=road, segment=segment)
+            gts_data = None
+            if gts_x is not None and gts_y is not None:
+                gts_data = gts_client.fetch_latest_values(
+                    x=gts_x,
+                    y=gts_y,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+        except requests.RequestException as exc:
+            abort(502, description=f"Failed to fetch external avalanche data: {exc}")
+        except ValueError as exc:
+            abort(400, description=str(exc))
+
+        return jsonify(
+            build_avalanche_risk_payload(
+                station=station,
+                latest=latest,
+                events=events,
+                road=road,
+                segment=segment,
+                gts_data=gts_data,
+            )
+        )
+
+    @blueprint.get("/api/avalanche-risk/debug/nvdb")
+    def avalanche_risk_debug_nvdb() -> Any:
+        road = (request.args.get("road") or "").strip()
+        segment = (request.args.get("segment") or "").strip()
+        if not road or not segment:
+            abort(400, description="Use ?road=RV5&segment=S8D1")
+
+        max_pages = request.args.get("max_pages", default=1, type=int)
+        max_pages = max(1, min(max_pages, 5))
+
+        try:
+            payload = nvdb_client.fetch_raw_avalanche_objects(
+                road=road,
+                segment=segment,
+                max_pages=max_pages,
+            )
+        except requests.RequestException as exc:
+            abort(502, description=f"Failed to fetch NVDB avalanche data: {exc}")
+
+        return jsonify(payload)
+
     return blueprint
 
 
@@ -234,6 +313,15 @@ def _parse_timestamp(value: str) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _parse_optional_date(value: str | None, default: date) -> date:
+    if not value:
+        return default
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        abort(400, description=f"Invalid date: {value}")
 
 
 def _load_capabilities(session) -> dict[int, dict[str, bool]]:
