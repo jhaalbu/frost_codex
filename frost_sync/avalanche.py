@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 import requests
+from requests import HTTPError
 
 from frost_sync.models import Station, StationLatest
 
@@ -40,6 +42,13 @@ class NvdbClient:
     def __init__(self, timeout_seconds: int = 60, session: requests.Session | None = None) -> None:
         self.timeout_seconds = timeout_seconds
         self.session = session or requests.Session()
+        self.session.headers.update(
+            {
+                "Accept": "application/json",
+                "User-Agent": "frost-sync-avalanche/1.0",
+                "X-Client": "frost-sync-avalanche",
+            }
+        )
 
     def fetch_snow_avalanche_events(self, road: str, segment: str, max_pages: int = 10) -> list[AvalancheEvent]:
         url, params = self._avalanche_request(road, segment)
@@ -51,8 +60,13 @@ class NvdbClient:
         for _ in range(max_pages):
             if not next_url:
                 break
-            response = self.session.get(next_url, params=next_params, timeout=self.timeout_seconds)
-            response.raise_for_status()
+            response = self.session.get(
+                next_url,
+                params=next_params,
+                timeout=self.timeout_seconds,
+                headers={"X-Request-ID": str(uuid4())},
+            )
+            self._raise_for_status(response)
             payload = response.json()
 
             for item in payload.get("objekter", []):
@@ -90,8 +104,13 @@ class NvdbClient:
         for _ in range(max_pages):
             if not next_url:
                 break
-            response = self.session.get(next_url, params=next_params, timeout=self.timeout_seconds)
-            response.raise_for_status()
+            response = self.session.get(
+                next_url,
+                params=next_params,
+                timeout=self.timeout_seconds,
+                headers={"X-Request-ID": str(uuid4())},
+            )
+            self._raise_for_status(response)
             payload = response.json()
             payload["_detailed_objects"] = [
                 self._fetch_object_detail(item) for item in payload.get("objekter", [])
@@ -117,7 +136,6 @@ class NvdbClient:
             {
                 "vegsystemreferanse": vegsystemreferanse,
                 "antall": 200,
-                "inkluderAntall": "false",
             },
         )
 
@@ -125,9 +143,22 @@ class NvdbClient:
         href = item.get("href")
         if not href:
             return item
-        response = self.session.get(href, timeout=self.timeout_seconds)
-        response.raise_for_status()
+        response = self.session.get(
+            href,
+            timeout=self.timeout_seconds,
+            headers={"X-Request-ID": str(uuid4())},
+        )
+        self._raise_for_status(response)
         return response.json()
+
+    def _raise_for_status(self, response: requests.Response) -> None:
+        try:
+            response.raise_for_status()
+        except HTTPError as exc:
+            detail = response.text.strip() or "<empty response body>"
+            raise RuntimeError(
+                f"NVDB request failed with {response.status_code}: {detail}"
+            ) from exc
 
 
 class NveGtsClient:
