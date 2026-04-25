@@ -119,8 +119,42 @@ class FrostClient:
         )
         return data
 
+    def fetch_observations_range(
+        self,
+        source_id: str,
+        from_dt: datetime,
+        to_dt: datetime,
+        elements: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        if from_dt > to_dt:
+            raise ValueError("from_dt must be earlier than or equal to to_dt")
+
+        return self._get(
+            "/observations/v0.jsonld",
+            {
+                "sources": source_id,
+                "referencetime": _time_range(from_dt, to_dt),
+                "elements": ",".join(elements or TARGET_ELEMENTS),
+                "qualities": self.acceptable_quality_codes,
+                "timeoffsets": "default",
+                "levels": "default",
+            },
+        )
+
     def fetch_snow_series_ids(self, source_ids: list[str], lookback_days: int) -> list[str]:
-        referencetime = _recent_range(lookback_days)
+        return self.fetch_snow_series_ids_for_range(
+            source_ids=source_ids,
+            from_dt=datetime.now(timezone.utc) - timedelta(days=lookback_days),
+            to_dt=datetime.now(timezone.utc),
+        )
+
+    def fetch_snow_series_ids_for_range(
+        self,
+        source_ids: list[str],
+        from_dt: datetime,
+        to_dt: datetime,
+    ) -> list[str]:
+        referencetime = _time_range(from_dt, to_dt)
         data = self._get(
             "/observations/availableTimeSeries/v0.jsonld",
             {
@@ -137,11 +171,25 @@ class FrostClient:
     def fetch_recent_snow_observations(self, series_ids: list[str], lookback_days: int) -> list[dict[str, Any]]:
         if not series_ids:
             return []
+        return self.fetch_snow_observations_range(
+            series_ids=series_ids,
+            from_dt=datetime.now(timezone.utc) - timedelta(days=lookback_days),
+            to_dt=datetime.now(timezone.utc),
+        )
+
+    def fetch_snow_observations_range(
+        self,
+        series_ids: list[str],
+        from_dt: datetime,
+        to_dt: datetime,
+    ) -> list[dict[str, Any]]:
+        if not series_ids:
+            return []
         return self._get(
             "/observations/v0.jsonld",
             {
                 "sources": ",".join(series_ids),
-                "referencetime": _recent_range(lookback_days),
+                "referencetime": _time_range(from_dt, to_dt),
                 "elements": "surface_snow_thickness",
                 "timeresolutions": "P1D",
                 "timeoffsets": "PT6H",
@@ -199,4 +247,8 @@ def _format_stationholders(value: Any) -> str | None:
 def _recent_range(days: int) -> str:
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
+    return _time_range(start, end)
+
+
+def _time_range(start: datetime, end: datetime) -> str:
     return f"{start.isoformat().replace('+00:00', 'Z')}/{end.isoformat().replace('+00:00', 'Z')}"

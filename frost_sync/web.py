@@ -14,8 +14,9 @@ from frost_sync.avalanche import (
     build_avalanche_risk_payload,
     summarize_backtest,
 )
-from frost_sync.config import load_settings
+from frost_sync.config import load_settings, require_frost_client_id
 from frost_sync.db import create_session_factory
+from frost_sync.frost_api import FrostClient
 from frost_sync.models import Observation, Station, StationCapability, StationLatest
 
 
@@ -46,6 +47,12 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
     session_factory = create_session_factory(settings.database_url)
     nvdb_client = NvdbClient(timeout_seconds=settings.request_timeout_seconds)
     gts_client = NveGtsClient(timeout_seconds=settings.request_timeout_seconds)
+    frost_client = FrostClient(
+        base_url=settings.frost_base_url,
+        client_id=require_frost_client_id(settings),
+        timeout_seconds=settings.request_timeout_seconds,
+        acceptable_quality_codes=settings.acceptable_quality_codes,
+    )
     blueprint = Blueprint(name, __name__)
 
     @blueprint.get("/health")
@@ -260,7 +267,15 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                 abort(404, description=f"Unknown station: {station_source_id}")
             station, latest = row
             if as_of is not None:
-                latest = _load_station_snapshot_as_of(session, station, as_of)
+                try:
+                    latest = _load_station_snapshot_with_fallback(
+                        session=session,
+                        station=station,
+                        as_of=as_of,
+                        frost_client=frost_client,
+                    )
+                except RuntimeError as exc:
+                    abort(502, description=f"Failed to fetch Frost history: {exc}")
 
         try:
             events = nvdb_client.fetch_snow_avalanche_events(road=road, segment=segment)
@@ -358,9 +373,38 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
 
         timestamps = list(_time_range(from_dt, to_dt, step_hours))
         series: list[dict[str, Any]] = []
+        frost_rows_cache: list[Observation] | None = None
+        retention_cutoff = datetime.now(timezone.utc) - timedelta(days=settings.retention_days)
+        if from_dt < retention_cutoff:
+            try:
+                frost_rows_cache = _load_station_rows_from_frost(
+                    station=station,
+                    from_dt=from_dt - timedelta(days=14),
+                    to_dt=to_dt,
+                    frost_client=frost_client,
+                )
+            except RuntimeError as exc:
+                abort(502, description=f"Failed to fetch Frost history: {exc}")
         with session_factory() as session:
             for as_of in timestamps:
-                snapshot = _load_station_snapshot_as_of(session, station, as_of)
+                if frost_rows_cache is not None:
+                    snapshot = _build_snapshot_from_rows(
+                        [
+                            row for row in frost_rows_cache
+                            if (_ensure_utc(row.reference_time) or as_of) <= as_of
+                        ],
+                        as_of,
+                    )
+                else:
+                    try:
+                        snapshot = _load_station_snapshot_with_fallback(
+                            session=session,
+                            station=station,
+                            as_of=as_of,
+                            frost_client=frost_client,
+                        )
+                    except RuntimeError as exc:
+                        abort(502, description=f"Failed to fetch Frost history: {exc}")
                 gts_data = None
                 gts_skipped_themes: list[dict[str, str]] = []
                 if gts_x is not None and gts_y is not None:
@@ -444,6 +488,18 @@ def _parse_optional_timestamp(value: str | None) -> datetime | None:
     return _parse_timestamp(value)
 
 
+def _load_station_snapshot_with_fallback(
+    session,
+    station: Station,
+    as_of: datetime,
+    frost_client: FrostClient,
+) -> AvalancheWeatherSnapshot | None:
+    snapshot = _load_station_snapshot_as_of(session, station, as_of)
+    if snapshot is not None:
+        return snapshot
+    return _load_station_snapshot_from_frost(station, as_of, frost_client)
+
+
 def _load_station_snapshot_as_of(
     session,
     station: Station,
@@ -474,6 +530,71 @@ def _load_station_snapshot_as_of(
         .scalars()
         .all()
     )
+    if not rows:
+        return None
+
+    return _build_snapshot_from_rows(rows, as_of)
+
+
+def _load_station_snapshot_from_frost(
+    station: Station,
+    as_of: datetime,
+    frost_client: FrostClient,
+) -> AvalancheWeatherSnapshot | None:
+    lookback_start = as_of - timedelta(days=14)
+    rows = _load_station_rows_from_frost(
+        station=station,
+        from_dt=lookback_start,
+        to_dt=as_of,
+        frost_client=frost_client,
+    )
+    if not rows:
+        return None
+
+    return _build_snapshot_from_rows(rows, as_of)
+
+
+def _load_station_rows_from_frost(
+    station: Station,
+    from_dt: datetime,
+    to_dt: datetime,
+    frost_client: FrostClient,
+) -> list[Observation]:
+    observation_rows = frost_client.fetch_observations_range(
+        source_id=station.source_id,
+        from_dt=from_dt,
+        to_dt=to_dt,
+    )
+    rows = _observation_models_from_frost_rows(
+        station=station,
+        observation_rows=observation_rows,
+        fetched_at=to_dt,
+    )
+
+    snow_series_ids = frost_client.fetch_snow_series_ids_for_range(
+        source_ids=[station.source_id],
+        from_dt=from_dt,
+        to_dt=to_dt,
+    )
+    snow_rows = frost_client.fetch_snow_observations_range(
+        series_ids=snow_series_ids,
+        from_dt=from_dt,
+        to_dt=to_dt,
+    )
+    rows.extend(
+        _observation_models_from_frost_rows(
+            station=station,
+            observation_rows=snow_rows,
+            fetched_at=to_dt,
+        )
+    )
+    return rows
+
+
+def _build_snapshot_from_rows(
+    rows: list[Observation],
+    as_of: datetime,
+) -> AvalancheWeatherSnapshot | None:
     if not rows:
         return None
 
@@ -531,6 +652,48 @@ def _load_station_snapshot_as_of(
         wind_from_direction=latest_wind_direction.value if latest_wind_direction else None,
         wind_from_direction_max=wind_direction_max,
     )
+
+
+def _observation_models_from_frost_rows(
+    station: Station,
+    observation_rows: list[dict[str, Any]],
+    fetched_at: datetime,
+) -> list[Observation]:
+    models: list[Observation] = []
+    for row in observation_rows:
+        source_id = _normalize_source_id(row.get("sourceId"))
+        if source_id and source_id != station.source_id:
+            continue
+
+        reference_time = _parse_optional_frost_reference_time(row.get("referenceTime"))
+        if reference_time is None:
+            continue
+
+        for item in row.get("observations", []):
+            element_id = item.get("elementId")
+            if not element_id:
+                continue
+            quality_code = _extract_quality_code(item.get("qualityCode"))
+            if quality_code is not None and quality_code >= 5:
+                continue
+            value = _normalize_frost_observation_value(element_id, item.get("value"))
+            if value is None and element_id in SNOW_DEPTH_ELEMENT_IDS:
+                continue
+
+            models.append(
+                Observation(
+                    station_id=station.id,
+                    reference_time=reference_time,
+                    element_id=element_id,
+                    value=value,
+                    unit=item.get("unit"),
+                    time_offset=item.get("timeOffset"),
+                    level=_format_level(item.get("level")),
+                    quality_code=quality_code,
+                    fetched_at=fetched_at,
+                )
+            )
+    return models
 
 
 def _load_capabilities(session) -> dict[int, dict[str, bool]]:
@@ -655,6 +818,48 @@ def _parse_event_date(value: str | None) -> date | None:
         except ValueError:
             continue
     return None
+
+
+def _parse_optional_frost_reference_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    return _parse_timestamp(value)
+
+
+def _normalize_source_id(value: str | None) -> str:
+    if not value:
+        return ""
+    return value.split(":", 1)[0]
+
+
+def _extract_quality_code(value: int | str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_frost_observation_value(element_id: str, value: float | int | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if element_id in SNOW_DEPTH_ELEMENT_IDS:
+        if numeric_value == -1:
+            return 0.0
+        if numeric_value <= -3:
+            return None
+    return numeric_value
+
+
+def _format_level(level: dict | None) -> str | None:
+    if not level:
+        return None
+    return ",".join(f"{key}={value}" for key, value in sorted(level.items()))
 
 
 def _empty_capability_flags() -> dict[str, bool]:
