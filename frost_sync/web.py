@@ -14,10 +14,13 @@ from frost_sync.models import Observation, Station, StationCapability, StationLa
 CAPABILITY_FLAG_MAP = {
     "air_temperature": "has_air_temperature",
     "sum(precipitation_amount PT1H)": "has_precipitation_1h",
+    "precipitation_1h": "has_precipitation_1h",
     "snow_depth": "has_snow_depth",
     "surface_snow_thickness": "has_snow_depth",
     "wind_from_direction": "has_wind_from_direction",
     "wind_speed": "has_wind_speed",
+    "discharge": "has_discharge",
+    "groundwater_level": "has_groundwater_level",
 }
 
 def create_app() -> Flask:
@@ -69,6 +72,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                     "properties": {
                         **_station_properties(station),
                         **capability_flags,
+                        **_parameter_profile_properties(capability_flags),
                         **_latest_properties(latest),
                     },
                 }
@@ -155,6 +159,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
         payload = {
             **_station_properties(station),
             "capabilities": capabilities,
+            **_parameter_profile_properties(_capability_flags_from_capabilities(capabilities)),
             "latest": _latest_properties(latest) if latest else None,
         }
         return jsonify(payload)
@@ -244,6 +249,15 @@ def _load_capabilities(session) -> dict[int, dict[str, bool]]:
             flags[flag_name] = row.available
     return capabilities
 
+
+def _capability_flags_from_capabilities(capabilities: dict[str, bool]) -> dict[str, bool]:
+    flags = _empty_capability_flags()
+    for element_id, available in capabilities.items():
+        flag_name = CAPABILITY_FLAG_MAP.get(element_id)
+        if flag_name:
+            flags[flag_name] = bool(available)
+    return flags
+
 def _empty_capability_flags() -> dict[str, bool]:
     return {flag: False for flag in CAPABILITY_FLAG_MAP.values()}
 
@@ -258,6 +272,8 @@ def _capability_flag_name(element_id: str) -> str:
         "snow_depth": "has_snow_depth",
         "wind_from_direction": "has_wind_from_direction",
         "wind_speed": "has_wind_speed",
+        "discharge": "has_discharge",
+        "groundwater_level": "has_groundwater_level",
     }
     return alias_map.get(element_id, "")
 
@@ -271,6 +287,50 @@ def _matches_has_filter(has_filter: str, capability_flags: dict[str, bool], late
         return capability_flags.get(flag_name, False) and latest.snow_depth is not None
 
     return capability_flags.get(flag_name, False)
+
+
+def _parameter_profile_properties(capability_flags: dict[str, bool]) -> dict[str, Any]:
+    count = sum(1 for value in capability_flags.values() if value)
+    return {
+        "available_parameter_count": count,
+        "parameter_profile": _parameter_profile_name(capability_flags),
+    }
+
+
+def _parameter_profile_name(capability_flags: dict[str, bool]) -> str:
+    weather_groups = {
+        "temperature": capability_flags.get("has_air_temperature", False),
+        "precipitation": capability_flags.get("has_precipitation_1h", False),
+        "wind": capability_flags.get("has_wind_speed", False) or capability_flags.get("has_wind_from_direction", False),
+        "snow": capability_flags.get("has_snow_depth", False),
+    }
+    hydrology_groups = {
+        "discharge": capability_flags.get("has_discharge", False),
+        "groundwater": capability_flags.get("has_groundwater_level", False),
+    }
+
+    weather_present = [name for name, present in weather_groups.items() if present]
+    hydrology_present = [name for name, present in hydrology_groups.items() if present]
+
+    if len(weather_present) == 4 and not hydrology_present:
+        return "complete"
+    if len(weather_present) == 4 and hydrology_present:
+        return "complete_plus_hydrology"
+    if set(weather_present) == {"temperature", "precipitation", "wind"}:
+        return "weather"
+    if set(weather_present) == {"temperature", "wind", "snow"}:
+        return "snow_weather"
+    if set(hydrology_present) == {"discharge", "groundwater"} and not weather_present:
+        return "hydrology_complete"
+    if len(weather_present) == 1 and not hydrology_present:
+        return weather_present[0]
+    if len(hydrology_present) == 1 and not weather_present:
+        return hydrology_present[0]
+    if not weather_present and not hydrology_present:
+        return "metadata_only"
+    if weather_present or hydrology_present:
+        return "_".join(weather_present + hydrology_present)
+    return "other"
 
 
 def _station_properties(station: Station) -> dict[str, Any]:
@@ -327,6 +387,10 @@ def _latest_properties(latest: StationLatest) -> dict[str, Any]:
         "wind_speed_max": latest.wind_speed_max,
         "wind_speed_max_unit": latest.wind_speed_max_unit,
         "wind_speed_max_time": latest.wind_speed_max_time,
+        "discharge": latest.discharge,
+        "discharge_unit": latest.discharge_unit,
+        "groundwater_level": latest.groundwater_level,
+        "groundwater_level_unit": latest.groundwater_level_unit,
         "updated_at": _isoformat(latest.updated_at),
     }
 

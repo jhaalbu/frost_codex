@@ -65,6 +65,10 @@ def upgrade_schema(database_url: str) -> None:
         "wind_speed_max_time": "VARCHAR(64)",
         "wind_from_direction_max": "FLOAT",
         "wind_from_direction_max_unit": "VARCHAR(64)",
+        "discharge": "FLOAT",
+        "discharge_unit": "VARCHAR(64)",
+        "groundwater_level": "FLOAT",
+        "groundwater_level_unit": "VARCHAR(64)",
     }
 
     for column_name, column_type in expected_columns.items():

@@ -10,12 +10,20 @@ from sqlalchemy.orm import Session
 
 from frost_sync.frost_api import FrostClient, FrostSource, TARGET_ELEMENTS
 from frost_sync.models import Observation, Station, StationCapability, StationLatest
-from frost_sync.nve_hydapi import NveHydApiClient, NveHydApiStation
+from frost_sync.nve_hydapi import (
+    DISCHARGE_ELEMENT,
+    GROUNDWATER_LEVEL_ELEMENT,
+    NveHydApiClient,
+    NveHydApiSeriesSpec,
+    NveHydApiStation,
+)
 
 
 logger = logging.getLogger(__name__)
 
 PRECIPITATION_ELEMENT = "sum(precipitation_amount PT1H)"
+PRECIPITATION_1H_ELEMENT = "precipitation_1h"
+PRECIPITATION_ELEMENT_IDS = {PRECIPITATION_ELEMENT, PRECIPITATION_1H_ELEMENT}
 AIR_TEMPERATURE_ELEMENT = "air_temperature"
 SNOW_DEPTH_ELEMENT = "snow_depth"
 SURFACE_SNOW_THICKNESS_ELEMENT = "surface_snow_thickness"
@@ -27,10 +35,23 @@ WIND_DIRECTION_ELEMENT = "wind_from_direction"
 ELEMENT_FIELD_MAP = {
     AIR_TEMPERATURE_ELEMENT: ("air_temperature", "air_temperature_unit"),
     PRECIPITATION_ELEMENT: ("precipitation_1h", "precipitation_1h_unit"),
+    PRECIPITATION_1H_ELEMENT: ("precipitation_1h", "precipitation_1h_unit"),
     SNOW_DEPTH_ELEMENT: ("snow_depth", "snow_depth_unit"),
     SURFACE_SNOW_THICKNESS_ELEMENT: ("snow_depth", "snow_depth_unit"),
     WIND_DIRECTION_ELEMENT: ("wind_from_direction", "wind_from_direction_unit"),
     WIND_SPEED_ELEMENT: ("wind_speed", "wind_speed_unit"),
+    DISCHARGE_ELEMENT: ("discharge", "discharge_unit"),
+    GROUNDWATER_LEVEL_ELEMENT: ("groundwater_level", "groundwater_level_unit"),
+}
+
+NVE_TARGET_ELEMENTS = {
+    AIR_TEMPERATURE_ELEMENT,
+    PRECIPITATION_1H_ELEMENT,
+    SNOW_DEPTH_ELEMENT,
+    WIND_DIRECTION_ELEMENT,
+    WIND_SPEED_ELEMENT,
+    DISCHARGE_ELEMENT,
+    GROUNDWATER_LEVEL_ELEMENT,
 }
 
 
@@ -64,10 +85,16 @@ class SyncService:
         sources = self.frost_client.fetch_sources(page_limit=page_limit)
         stations_by_source = self._upsert_stations(sources)
         nve_station_count = 0
+        nve_series_specs: list[NveHydApiSeriesSpec] = []
+        nve_station_ids_by_element: dict[str, set[str]] = {}
         if self.nve_hydapi_client is not None:
             nve_stations = self.nve_hydapi_client.fetch_stations()
             self._upsert_nve_stations(nve_stations)
             nve_station_count = len(nve_stations)
+            nve_series_specs = self._preferred_nve_series_specs(nve_stations)
+            if not nve_series_specs:
+                nve_series_specs = self.nve_hydapi_client.fetch_series_specs()
+            nve_station_ids_by_element = self._nve_station_ids_by_element(nve_series_specs)
         capability_source_ids = {
             element_id: self.frost_client.fetch_capability_source_ids(element_id)
             for element_id in TARGET_ELEMENTS
@@ -85,7 +112,27 @@ class SyncService:
                 for element_id, source_ids in capability_source_ids.items()
                 if source.source_id in source_ids and element_id not in SNOW_DEPTH_ELEMENT_IDS
             }
-            capabilities_updated += self._upsert_capabilities(station, available_elements)
+            capabilities_updated += self._upsert_capabilities_for_elements(
+                station=station,
+                tracked_elements=set(TARGET_ELEMENTS),
+                available_elements=available_elements,
+            )
+
+        if nve_station_ids_by_element:
+            nve_station_rows = self.session.execute(
+                select(Station).where(Station.provider == "nve_hydapi")
+            ).scalars().all()
+            for station in nve_station_rows:
+                available_elements = {
+                    element_id
+                    for element_id, source_ids in nve_station_ids_by_element.items()
+                    if station.source_id in source_ids
+                }
+                capabilities_updated += self._upsert_capabilities_for_elements(
+                    station=station,
+                    tracked_elements=NVE_TARGET_ELEMENTS,
+                    available_elements=available_elements,
+                )
 
         self.session.commit()
 
@@ -121,10 +168,28 @@ class SyncService:
             if source.source_id not in snow_capable_source_ids:
                 continue
             station = stations_by_source[source.source_id]
-            capabilities_updated += self._upsert_capabilities(
-                station,
-                {SURFACE_SNOW_THICKNESS_ELEMENT},
+            capabilities_updated += self._upsert_capabilities_for_elements(
+                station=station,
+                tracked_elements=set(TARGET_ELEMENTS),
+                available_elements={SURFACE_SNOW_THICKNESS_ELEMENT},
             )
+
+        if nve_series_specs:
+            try:
+                nve_stations_by_source = {
+                    station.source_id: station
+                    for station in self.session.execute(
+                        select(Station).where(Station.provider == "nve_hydapi")
+                    ).scalars()
+                }
+                nve_rows = self.nve_hydapi_client.fetch_latest_observations(nve_series_specs)
+                nve_written, nve_latest = self._store_observations_batch(nve_stations_by_source, nve_rows)
+                observations_written += nve_written
+                latest_updated += nve_latest
+            except Exception as exc:
+                self.session.rollback()
+                logger.exception("Failed to sync NVE HydAPI observations: %s", exc)
+                station_errors += len(nve_series_specs)
 
         observations_deleted = self._prune_old_observations(retention_days)
         self.session.commit()
@@ -274,7 +339,12 @@ class SyncService:
             station.latitude = source.latitude
             station.last_seen_at = now
 
-    def _upsert_capabilities(self, station: Station, available_elements: set[str]) -> int:
+    def _upsert_capabilities_for_elements(
+        self,
+        station: Station,
+        tracked_elements: set[str],
+        available_elements: set[str],
+    ) -> int:
         now = datetime.now(timezone.utc)
         existing = {
             capability.element_id: capability
@@ -284,7 +354,7 @@ class SyncService:
         }
 
         updated = 0
-        for element_id in TARGET_ELEMENTS:
+        for element_id in tracked_elements:
             available = element_id in available_elements
             capability = existing.get(element_id)
             if capability is None:
@@ -306,6 +376,22 @@ class SyncService:
             capability.last_seen_at = now
 
         return updated
+
+    def _preferred_nve_series_specs(self, stations: Iterable[NveHydApiStation]) -> list[NveHydApiSeriesSpec]:
+        preferred_by_station_and_element: dict[tuple[str, str], NveHydApiSeriesSpec] = {}
+        for station in stations:
+            for spec in station.series_specs:
+                key = (spec.source_id, spec.logical_element_id)
+                current = preferred_by_station_and_element.get(key)
+                if current is None or spec.resolution_time < current.resolution_time:
+                    preferred_by_station_and_element[key] = spec
+        return list(preferred_by_station_and_element.values())
+
+    def _nve_station_ids_by_element(self, series_specs: Iterable[NveHydApiSeriesSpec]) -> dict[str, set[str]]:
+        station_ids_by_element: dict[str, set[str]] = {}
+        for spec in series_specs:
+            station_ids_by_element.setdefault(spec.logical_element_id, set()).add(spec.source_id)
+        return station_ids_by_element
 
     def _store_observations_batch(self, stations_by_source: dict[str, Station], observation_rows: list[dict]) -> tuple[int, int]:
         now = datetime.now(timezone.utc)
@@ -353,7 +439,7 @@ class SyncService:
                 normalized_value = _normalize_observation_value(element_id, item.get("value"))
                 if normalized_value is None and element_id in SNOW_DEPTH_ELEMENT_IDS:
                     continue
-                if element_id == PRECIPITATION_ELEMENT and road_station_precipitation_is_suspect:
+                if element_id in PRECIPITATION_ELEMENT_IDS and road_station_precipitation_is_suspect:
                     if latest.precipitation_1h is not None:
                         latest.precipitation_1h = None
                         latest.precipitation_1h_unit = None
@@ -415,7 +501,7 @@ class SyncService:
                     Observation.reference_time <= observed_at,
                     Observation.element_id.in_(
                         [
-                            PRECIPITATION_ELEMENT,
+                            *sorted(PRECIPITATION_ELEMENT_IDS),
                             AIR_TEMPERATURE_ELEMENT,
                             *sorted(SNOW_DEPTH_ELEMENT_IDS),
                             WIND_SPEED_ELEMENT,
@@ -429,7 +515,7 @@ class SyncService:
         )
 
         precipitation_rows = sorted(
-            [row for row in rows if row.element_id == PRECIPITATION_ELEMENT and row.value is not None],
+            [row for row in rows if row.element_id in PRECIPITATION_ELEMENT_IDS and row.value is not None],
             key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
         )
         temperature_rows = [row for row in rows if row.element_id == AIR_TEMPERATURE_ELEMENT and row.value is not None]
@@ -572,6 +658,8 @@ def _is_suspect_road_station_precipitation(station: Station, row: dict) -> bool:
     air_temperature = _observation_value_for_element(observations, AIR_TEMPERATURE_ELEMENT)
     wind_speed = _observation_value_for_element(observations, WIND_SPEED_ELEMENT)
     precipitation_1h = _observation_value_for_element(observations, PRECIPITATION_ELEMENT)
+    if precipitation_1h is None:
+        precipitation_1h = _observation_value_for_element(observations, PRECIPITATION_1H_ELEMENT)
 
     return (
         air_temperature is not None

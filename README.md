@@ -1,7 +1,7 @@
 # Frost station sync prototype
 
 This project syncs weather observations from MET Norway's Frost API for all Norwegian stations and exposes the data through a small Flask API that fits ArcGIS/web map use cases.
-It can also import station metadata from NVE HydAPI when an NVE API key is configured.
+It can also import station metadata and selected latest observations from NVE HydAPI when an NVE API key is configured.
 
 The local development setup uses SQLite by default. The code is structured so the same service can later run on PythonAnywhere with MySQL by changing the database URL.
 
@@ -9,9 +9,9 @@ The local development setup uses SQLite by default. The code is structured so th
 
 - `stations`: metadata and coordinates for Norwegian stations
   Includes `provider`, so stations can come from `frost` or `nve_hydapi`
-- `station_capabilities`: which requested Frost elements each station exposes
+- `station_capabilities`: which supported elements each station exposes
 - `observations`: history table with one row per element and timestamp
-- `station_latest`: one row per station with latest values for map display, including rolling precipitation for the last 24 hours
+- `station_latest`: one row per station with latest values for map display, including rolling precipitation for the last 24 hours, plus hydrology fields like `discharge` and `groundwater_level`
 - `stations.stationholder`: the Frost station holder, exposed as `stationholder` in GeoJSON
 
 ## Quick start
@@ -70,8 +70,8 @@ flask --app app run --host 127.0.0.1 --port 5000
 - `GET /api/stations/SN18700/observations?date=2026-04-03`
 
 The `latest.geojson` endpoint is the best starting point for ArcGIS map display because it returns one feature per station with the latest values already flattened into fields.
-It includes both `precipitation_1h` and rolling `precipitation_24h`.
-Stations from NVE HydAPI are stored as metadata in the same `stations` table, but only Frost stations currently receive observation sync into `station_latest`.
+It includes both `precipitation_1h` and rolling `precipitation_24h`, and can also include `discharge` and `groundwater_level` for NVE HydAPI stations.
+To make ArcGIS symbolization easier, the endpoint also includes `available_parameter_count` and `parameter_profile`.
 
 ## Reuse inside an existing Flask app
 
@@ -147,7 +147,7 @@ mysql+pymysql://yourusername:your-mysql-password@your-mysql-host/yourusername$we
 ## Notes
 
 - Frost API authentication uses the client ID as the username and an empty password.
-- NVE HydAPI requires an API key in the `X-API-Key` header; station metadata sync is enabled only when `NVE_HYDAPI_KEY` is set.
+- NVE HydAPI requires an API key in the `X-API-Key` header; station and latest observation sync is enabled only when `NVE_HYDAPI_KEY` is set.
 - The sync uses `sources` and `observations` endpoints.
 - Some stations do not have all requested elements, so capability tracking is stored separately from observation values.
 - If a `.env` file exists in the project root, it is loaded automatically.

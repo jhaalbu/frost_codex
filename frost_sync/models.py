@@ -107,6 +107,10 @@ class StationLatest(Base):
     wind_speed_max_time: Mapped[Optional[str]] = mapped_column(String(64))
     wind_from_direction_max: Mapped[Optional[float]] = mapped_column(Float)
     wind_from_direction_max_unit: Mapped[Optional[str]] = mapped_column(String(64))
+    discharge: Mapped[Optional[float]] = mapped_column(Float)
+    discharge_unit: Mapped[Optional[str]] = mapped_column(String(64))
+    groundwater_level: Mapped[Optional[float]] = mapped_column(Float)
+    groundwater_level_unit: Mapped[Optional[str]] = mapped_column(String(64))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     station: Mapped[Station] = relationship(back_populates="latest")
