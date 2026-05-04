@@ -6,6 +6,7 @@ import logging
 from frost_sync.config import load_settings, require_frost_client_id
 from frost_sync.db import create_schema, create_session_factory
 from frost_sync.frost_api import FrostClient
+from frost_sync.nve_hydapi import NveHydApiClient
 from frost_sync.service import SyncService
 
 
@@ -41,9 +42,20 @@ def main() -> None:
             timeout_seconds=settings.request_timeout_seconds,
             acceptable_quality_codes=settings.acceptable_quality_codes,
         )
+        nve_hydapi_client = None
+        if settings.nve_hydapi_key:
+            nve_hydapi_client = NveHydApiClient(
+                base_url=settings.nve_hydapi_base_url,
+                api_key=settings.nve_hydapi_key,
+                timeout_seconds=settings.request_timeout_seconds,
+            )
 
         with session_factory() as session:
-            service = SyncService(session=session, frost_client=frost_client)
+            service = SyncService(
+                session=session,
+                frost_client=frost_client,
+                nve_hydapi_client=nve_hydapi_client,
+            )
             summary = service.run_hourly_sync(
                 page_limit=settings.page_limit,
                 source_batch_size=settings.source_batch_size,

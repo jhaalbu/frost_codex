@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from frost_sync.frost_api import FrostClient, FrostSource, TARGET_ELEMENTS
 from frost_sync.models import Observation, Station, StationCapability, StationLatest
+from frost_sync.nve_hydapi import NveHydApiClient, NveHydApiStation
 
 
 logger = logging.getLogger(__name__)
@@ -44,9 +45,15 @@ class SyncSummary:
 
 
 class SyncService:
-    def __init__(self, session: Session, frost_client: FrostClient) -> None:
+    def __init__(
+        self,
+        session: Session,
+        frost_client: FrostClient,
+        nve_hydapi_client: NveHydApiClient | None = None,
+    ) -> None:
         self.session = session
         self.frost_client = frost_client
+        self.nve_hydapi_client = nve_hydapi_client
 
     def run_hourly_sync(
         self,
@@ -56,6 +63,11 @@ class SyncService:
     ) -> SyncSummary:
         sources = self.frost_client.fetch_sources(page_limit=page_limit)
         stations_by_source = self._upsert_stations(sources)
+        nve_station_count = 0
+        if self.nve_hydapi_client is not None:
+            nve_stations = self.nve_hydapi_client.fetch_stations()
+            self._upsert_nve_stations(nve_stations)
+            nve_station_count = len(nve_stations)
         capability_source_ids = {
             element_id: self.frost_client.fetch_capability_source_ids(element_id)
             for element_id in TARGET_ELEMENTS
@@ -118,7 +130,7 @@ class SyncService:
         self.session.commit()
 
         return SyncSummary(
-            stations_seen=len(sources),
+            stations_seen=len(sources) + nve_station_count,
             capabilities_updated=capabilities_updated,
             observations_written=observations_written,
             latest_updated=latest_updated,
@@ -218,6 +230,7 @@ class SyncService:
                 stations[source.source_id] = station
 
             station.name = source.name
+            station.provider = "frost"
             station.stationholder = source.stationholder
             station.country = source.country
             station.county = source.county
@@ -231,6 +244,35 @@ class SyncService:
 
         self.session.flush()
         return stations
+
+    def _upsert_nve_stations(self, stations: Iterable[NveHydApiStation]) -> None:
+        now = datetime.now(timezone.utc)
+        source_ids = [station.source_id for station in stations]
+        if not source_ids:
+            return
+
+        existing = self.session.execute(
+            select(Station).where(Station.source_id.in_(source_ids))
+        ).scalars().all()
+        existing_by_source = {station.source_id: station for station in existing}
+
+        for source in stations:
+            station = existing_by_source.get(source.source_id)
+            if station is None:
+                station = Station(source_id=source.source_id, last_seen_at=now)
+                self.session.add(station)
+                existing_by_source[source.source_id] = station
+
+            station.provider = "nve_hydapi"
+            station.name = source.name
+            station.stationholder = source.stationholder
+            station.country = source.country
+            station.county = source.county
+            station.municipality = source.municipality
+            station.masl = source.masl
+            station.longitude = source.longitude
+            station.latitude = source.latitude
+            station.last_seen_at = now
 
     def _upsert_capabilities(self, station: Station, available_elements: set[str]) -> int:
         now = datetime.now(timezone.utc)
