@@ -334,6 +334,7 @@ def _parameter_profile_name(capability_flags: dict[str, bool]) -> str:
 
 
 def _station_properties(station: Station) -> dict[str, Any]:
+    recent_status = _recent_status(station.last_observation_time)
     return {
         "source_id": station.source_id,
         "provider": station.provider,
@@ -349,6 +350,8 @@ def _station_properties(station: Station) -> dict[str, Any]:
         "valid_to": _isoformat(station.valid_to),
         "last_seen_at": _isoformat(station.last_seen_at),
         "last_observation_time": _isoformat(station.last_observation_time),
+        "has_recent_data": recent_status["has_recent_data"],
+        "minutes_since_observation": recent_status["minutes_since_observation"],
     }
 
 
@@ -364,6 +367,7 @@ def _latest_properties(latest: StationLatest) -> dict[str, Any]:
         "air_temperature_max_time": latest.air_temperature_max_time,
         "precipitation_1h": latest.precipitation_1h,
         "precipitation_1h_unit": latest.precipitation_1h_unit,
+        "is_precipitation_suspect": latest.is_precipitation_suspect,
         "precipitation_1h_max": latest.precipitation_1h_max,
         "precipitation_1h_max_unit": latest.precipitation_1h_max_unit,
         "precipitation_1h_max_period": latest.precipitation_1h_max_period,
@@ -408,3 +412,18 @@ def _ensure_utc(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _recent_status(last_observation_time: datetime | None, recent_minutes: int = 120) -> dict[str, Any]:
+    observed_at = _ensure_utc(last_observation_time)
+    if observed_at is None:
+        return {
+            "has_recent_data": False,
+            "minutes_since_observation": None,
+        }
+
+    minutes_since = int((datetime.now(timezone.utc) - observed_at).total_seconds() // 60)
+    return {
+        "has_recent_data": minutes_since <= recent_minutes,
+        "minutes_since_observation": minutes_since,
+    }

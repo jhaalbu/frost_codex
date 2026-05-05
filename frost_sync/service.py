@@ -419,6 +419,7 @@ class SyncService:
                 latest = StationLatest(
                     station_id=station.id,
                     source_id=station.source_id,
+                    is_precipitation_suspect=False,
                     updated_at=now,
                 )
                 self.session.add(latest)
@@ -440,9 +441,13 @@ class SyncService:
                 if normalized_value is None and element_id in SNOW_DEPTH_ELEMENT_IDS:
                     continue
                 if element_id in PRECIPITATION_ELEMENT_IDS and road_station_precipitation_is_suspect:
-                    if latest.precipitation_1h is not None:
+                    current_time = _ensure_utc(latest.observed_at)
+                    should_update = current_time is None or reference_time >= current_time
+                    if should_update:
                         latest.precipitation_1h = None
                         latest.precipitation_1h_unit = None
+                        latest.is_precipitation_suspect = True
+                        latest.observed_at = reference_time
                         has_latest_change = True
                     continue
 
@@ -476,6 +481,8 @@ class SyncService:
                 normalized_item["qualityCode"] = quality_code
 
                 if _apply_latest_observation(latest, reference_time, normalized_item):
+                    if element_id in PRECIPITATION_ELEMENT_IDS:
+                        latest.is_precipitation_suspect = False
                     has_latest_change = True
 
             if has_latest_change:
@@ -531,9 +538,8 @@ class SyncService:
         }
         if _is_road_stationholder(station.stationholder):
             precipitation_rows = _filter_suspect_road_station_precipitation(
+                station=station,
                 precipitation_rows=precipitation_rows,
-                temperature_rows=temperature_rows,
-                wind_speed_rows=wind_speed_rows,
             )
 
         latest.precipitation_24h = float(sum(row.value for row in precipitation_rows if row.value is not None)) if precipitation_rows else None
@@ -655,20 +661,11 @@ def _is_suspect_road_station_precipitation(station: Station, row: dict) -> bool:
         return False
 
     observations = row.get("observations", [])
-    air_temperature = _observation_value_for_element(observations, AIR_TEMPERATURE_ELEMENT)
-    wind_speed = _observation_value_for_element(observations, WIND_SPEED_ELEMENT)
     precipitation_1h = _observation_value_for_element(observations, PRECIPITATION_ELEMENT)
     if precipitation_1h is None:
         precipitation_1h = _observation_value_for_element(observations, PRECIPITATION_1H_ELEMENT)
 
-    return (
-        air_temperature is not None
-        and wind_speed is not None
-        and precipitation_1h is not None
-        and air_temperature < 1.0
-        and wind_speed > 5.0
-        and precipitation_1h > 5.0
-    )
+    return precipitation_1h is not None and precipitation_1h > 5.0
 
 
 def _is_road_stationholder(stationholder: str | None) -> bool:
@@ -690,32 +687,15 @@ def _observation_value_for_element(observations: list[dict], element_id: str) ->
 
 
 def _filter_suspect_road_station_precipitation(
+    station: Station,
     precipitation_rows: list[Observation],
-    temperature_rows: list[Observation],
-    wind_speed_rows: list[Observation],
 ) -> list[Observation]:
-    temperatures = {
-        _ensure_utc(row.reference_time): row.value
-        for row in temperature_rows
-        if row.value is not None
-    }
-    wind_speeds = {
-        _ensure_utc(row.reference_time): row.value
-        for row in wind_speed_rows
-        if row.value is not None
-    }
-
     filtered: list[Observation] = []
     for row in precipitation_rows:
-        row_time = _ensure_utc(row.reference_time)
-        temperature = temperatures.get(row_time)
-        wind_speed = wind_speeds.get(row_time)
         if (
+            _is_road_stationholder(station.stationholder)
+            and
             row.value is not None
-            and temperature is not None
-            and wind_speed is not None
-            and temperature < 1.0
-            and wind_speed > 5.0
             and row.value > 5.0
         ):
             continue
@@ -724,6 +704,7 @@ def _filter_suspect_road_station_precipitation(
 
 
 def _reset_window_metrics(latest: StationLatest) -> None:
+    latest.is_precipitation_suspect = False
     latest.precipitation_1h_max = None
     latest.precipitation_1h_max_unit = None
     latest.precipitation_3h = None

@@ -51,6 +51,7 @@ def upgrade_schema(database_url: str) -> None:
         "precipitation_1h_max": "FLOAT",
         "precipitation_1h_max_unit": "VARCHAR(64)",
         "precipitation_1h_max_period": "VARCHAR(128)",
+        "is_precipitation_suspect": "BOOLEAN NOT NULL DEFAULT 0",
         "precipitation_3h": "FLOAT",
         "precipitation_3h_unit": "VARCHAR(64)",
         "precipitation_3h_max": "FLOAT",

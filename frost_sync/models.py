@@ -84,6 +84,7 @@ class StationLatest(Base):
     air_temperature_max_time: Mapped[Optional[str]] = mapped_column(String(64))
     precipitation_1h: Mapped[Optional[float]] = mapped_column(Float)
     precipitation_1h_unit: Mapped[Optional[str]] = mapped_column(String(64))
+    is_precipitation_suspect: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     precipitation_1h_max: Mapped[Optional[float]] = mapped_column(Float)
     precipitation_1h_max_unit: Mapped[Optional[str]] = mapped_column(String(64))
     precipitation_1h_max_period: Mapped[Optional[str]] = mapped_column(String(128))
