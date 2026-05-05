@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -67,6 +68,7 @@ class NveHydApiClient:
         self.timeout_seconds = timeout_seconds
         self._last_observations_call_at = 0.0
         self.session = requests.Session()
+        self.session.trust_env = False
         self.session.headers.update(
             {
                 "Accept": "application/json",
@@ -163,40 +165,70 @@ class NveHydApiClient:
 
     def fetch_series_specs(self) -> list[NveHydApiSeriesSpec]:
         payload = self._get("/Series", params={})
-        selected: dict[tuple[str, str], NveHydApiSeriesSpec] = {}
-        for item in payload.get("data", []):
-            if not isinstance(item, dict):
-                continue
-            source_id = _first_non_empty(item, "stationId", "StationId")
-            if not source_id:
-                continue
-            logical_element_id = _logical_element_id(item)
-            if logical_element_id is None:
-                continue
-            parameter = _first_non_empty(item, "parameter", "Parameter", "parameterId", "ParameterId")
-            if not parameter:
-                continue
-            resolution_time = _preferred_resolution_time(logical_element_id, item)
-            if resolution_time is None:
-                continue
+        return _select_series_specs(payload.get("data", []))
 
-            candidate = NveHydApiSeriesSpec(
-                source_id=source_id,
-                parameter=parameter,
-                logical_element_id=logical_element_id,
-                resolution_time=resolution_time,
-                unit=_first_non_empty(item, "unit", "Unit"),
-            )
-            key = (source_id, logical_element_id)
-            existing = selected.get(key)
-            if existing is None or _is_better_resolution(
-                logical_element_id=logical_element_id,
-                candidate_resolution=resolution_time,
-                existing_resolution=existing.resolution_time,
-            ):
-                selected[key] = candidate
+    def fetch_series_specs_for_station(self, source_id: str) -> list[NveHydApiSeriesSpec]:
+        payload = self._get("/Series", params={"StationId": source_id})
+        return _select_series_specs(payload.get("data", []))
 
-        return list(selected.values())
+    def fetch_observations_range(
+        self,
+        series_specs: list[NveHydApiSeriesSpec],
+        from_dt: datetime,
+        to_dt: datetime,
+    ) -> list[dict[str, Any]]:
+        if not series_specs:
+            return []
+
+        spec_by_key = {(spec.source_id, str(spec.parameter)): spec for spec in series_specs}
+        grouped_rows: dict[tuple[str, str], dict[str, Any]] = {}
+        reference_time = f"{_isoformat_utc(from_dt)}/{_isoformat_utc(to_dt)}"
+
+        for batch in _chunked(series_specs, 10):
+            response_data = self._post(
+                "/Observations",
+                [
+                    {
+                        "stationId": spec.source_id,
+                        "parameter": spec.parameter,
+                        "resolutionTime": str(spec.resolution_time),
+                        "referenceTime": reference_time,
+                    }
+                    for spec in batch
+                ],
+            ).get("data", [])
+
+            for item in response_data:
+                source_id = _first_non_empty(item, "stationId", "StationId")
+                parameter = _first_non_empty(item, "parameter", "Parameter")
+                if not source_id or parameter is None:
+                    continue
+                spec = spec_by_key.get((source_id, parameter))
+                if spec is None:
+                    continue
+                unit = _first_non_empty(item, "unit", "Unit") or spec.unit
+                for observation in item.get("observations", []):
+                    reference = _first_non_empty(observation, "time", "Time")
+                    if not reference:
+                        continue
+                    row = grouped_rows.setdefault(
+                        (source_id, reference),
+                        {
+                            "sourceId": source_id,
+                            "referenceTime": reference,
+                            "observations": [],
+                        },
+                    )
+                    row["observations"].append(
+                        {
+                            "elementId": spec.logical_element_id,
+                            "value": observation.get("value"),
+                            "unit": unit,
+                            "qualityCode": observation.get("quality"),
+                        }
+                    )
+
+        return list(grouped_rows.values())
 
     def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         response = self.session.get(
@@ -492,3 +524,42 @@ def _normalize_text(value: str) -> str:
 
 def _chunked(items: list[NveHydApiSeriesSpec], chunk_size: int) -> list[list[NveHydApiSeriesSpec]]:
     return [items[index:index + chunk_size] for index in range(0, len(items), chunk_size)]
+
+
+def _select_series_specs(items: list[dict[str, Any]]) -> list[NveHydApiSeriesSpec]:
+    selected: dict[tuple[str, str], NveHydApiSeriesSpec] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        source_id = _first_non_empty(item, "stationId", "StationId")
+        if not source_id:
+            continue
+        logical_element_id = _logical_element_id(item)
+        if logical_element_id is None:
+            continue
+        parameter = _first_non_empty(item, "parameter", "Parameter", "parameterId", "ParameterId")
+        if not parameter:
+            continue
+        resolution_time = _preferred_resolution_time(logical_element_id, item)
+        if resolution_time is None:
+            continue
+        candidate = NveHydApiSeriesSpec(
+            source_id=source_id,
+            parameter=parameter,
+            logical_element_id=logical_element_id,
+            resolution_time=resolution_time,
+            unit=_first_non_empty(item, "unit", "Unit"),
+        )
+        key = (source_id, logical_element_id)
+        existing = selected.get(key)
+        if existing is None or _is_better_resolution(
+            logical_element_id=logical_element_id,
+            candidate_resolution=resolution_time,
+            existing_resolution=existing.resolution_time,
+        ):
+            selected[key] = candidate
+    return list(selected.values())
+
+
+def _isoformat_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")

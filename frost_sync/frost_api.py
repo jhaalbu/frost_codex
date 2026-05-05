@@ -15,6 +15,7 @@ TARGET_ELEMENTS = [
     "snow_depth",
     "wind_from_direction",
     "wind_speed",
+    "max(wind_speed_of_gust PT10M)",
 ]
 
 
@@ -45,6 +46,7 @@ class FrostClient:
         self.timeout_seconds = timeout_seconds
         self.acceptable_quality_codes = acceptable_quality_codes
         self.session = requests.Session()
+        self.session.trust_env = False
         self.session.auth = (client_id, "")
 
     def _get(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -118,6 +120,30 @@ class FrostClient:
             },
         )
         return data
+
+    def fetch_observations_range(
+        self,
+        source_ids: str | list[str],
+        elements: list[str],
+        from_dt: datetime,
+        to_dt: datetime,
+    ) -> list[dict[str, Any]]:
+        if isinstance(source_ids, list):
+            source_value = ",".join(source_ids)
+        else:
+            source_value = source_ids
+
+        return self._get(
+            "/observations/v0.jsonld",
+            {
+                "sources": source_value,
+                "referencetime": f"{_isoformat_utc(from_dt)}/{_isoformat_utc(to_dt)}",
+                "elements": ",".join(elements),
+                "qualities": self.acceptable_quality_codes,
+                "timeoffsets": "default",
+                "levels": "default",
+            },
+        )
 
     def fetch_snow_series_ids(self, source_ids: list[str], lookback_days: int) -> list[str]:
         referencetime = _recent_range(lookback_days)
@@ -199,4 +225,8 @@ def _format_stationholders(value: Any) -> str | None:
 def _recent_range(days: int) -> str:
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
-    return f"{start.isoformat().replace('+00:00', 'Z')}/{end.isoformat().replace('+00:00', 'Z')}"
+    return f"{_isoformat_utc(start)}/{_isoformat_utc(end)}"
+
+
+def _isoformat_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")

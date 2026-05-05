@@ -68,10 +68,23 @@ flask --app app run --host 127.0.0.1 --port 5000
 - `GET /api/stations/history.geojson?from=2026-04-03T00:00:00Z&to=2026-04-03T23:59:59Z`
 - `GET /api/stations/SN18700`
 - `GET /api/stations/SN18700/observations?date=2026-04-03`
+- `GET /api/parameters`
+- `GET /api/stations/SN18700/timeseries?parameters=air_temperature,precipitation_1h,precipitation_24h_rolling&from=2026-05-04T00:00:00Z&to=2026-05-05T23:59:59Z`
 
 The `latest.geojson` endpoint is the best starting point for ArcGIS map display because it returns one feature per station with the latest values already flattened into fields.
 It includes both `precipitation_1h` and rolling `precipitation_24h`, and can also include `discharge` and `groundwater_level` for NVE HydAPI stations.
 To make ArcGIS symbolization easier, the endpoint also includes `available_parameter_count` and `parameter_profile`.
+
+The `timeseries` endpoint is meant for plotting in applications like VertiGIS/Highcharts.
+It fetches data directly from Frost or NVE HydAPI instead of reading the local history table, so you can request longer periods without having to keep all plotting data in the local database.
+The only derived plotting series currently exposed is `precipitation_24h_rolling`, which is calculated from hourly precipitation values returned by the provider.
+For Frost plotting, the endpoint now prefers hourly series such as `mean(air_temperature PT1H)`, `mean(wind_speed PT1H)`, `mean(wind_from_direction PT1H)` and `max(wind_speed_of_gust PT1H)`.
+If a station does not expose those hourly Frost elements, the API falls back to raw observations and aggregates them to hourly values before returning the series.
+The response is intentionally simple:
+- `station` contains `provider`, `source_id`, `stationholder`, `name` and `masl`
+- `series` is an object keyed by parameter name
+- each parameter contains `parameter`, `unit` and `data`
+- each `data` point contains `time`, `timestamp`, `value` and `quality_code`
 
 ## Reuse inside an existing Flask app
 
@@ -157,4 +170,4 @@ mysql+pymysql://yourusername:your-mysql-password@your-mysql-host/yourusername$we
 - `app.py` expects `FROST_CLIENT_ID` in environment variables or `.env`; the key is no longer hardcoded in source.
 - `FROST_RETENTION_DAYS=14` prunes old rows from `observations` while keeping `station_latest` available for map display.
 - Re-running `python -m frost_sync init-db` is safe and will add newer `station_latest` columns like `precipitation_24h` when needed.
-- For stations held by SVV/Statens vegvesen, hourly precipitation is excluded from latest and rolling precipitation metrics when temperature is below 1 degC, wind speed is above 5 m/s, and the hourly precipitation value is above 5 mm.
+- For stations held by SVV/Statens vegvesen, hourly precipitation above 5 mm is marked with `is_precipitation_suspect` and excluded from the latest precipitation value used in map display.

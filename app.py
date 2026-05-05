@@ -33,6 +33,8 @@ def create_app() -> Flask:
         "FROST_USER_AGENT",
         "SVV-VertiGIS-Workflow/1.0 (your.email@example.com)",
     )
+    frost_session = requests.Session()
+    frost_session.trust_env = False
     route_prefix = os.getenv("FROST_ROUTE_PREFIX", "/weather").rstrip("/") or "/weather"
 
     app.register_blueprint(create_blueprint(), url_prefix=route_prefix)
@@ -67,7 +69,7 @@ def create_app() -> Flask:
                 400,
             )
 
-        response = requests.get(
+        response = frost_session.get(
             FROST_OBS_URL,
             headers=_frost_headers(auth_header, user_agent),
             params=params,
@@ -106,7 +108,7 @@ def create_app() -> Flask:
         if not source:
             return jsonify({"error": "Missing required parameter: sources"}), 400
 
-        response = requests.get(
+        response = frost_session.get(
             FROST_AVAILABLE_URL,
             headers=_frost_headers(auth_header, user_agent),
             params={"sources": source},
@@ -125,7 +127,7 @@ def create_app() -> Flask:
         if not source:
             return jsonify({"error": "Missing required parameter: sources"}), 400
 
-        response = requests.get(
+        response = frost_session.get(
             FROST_SOURCES_URL,
             headers=_frost_headers(auth_header, user_agent),
             params={"ids": source},
