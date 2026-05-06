@@ -171,7 +171,7 @@ class SyncService:
             station = stations_by_source[source.source_id]
             capabilities_updated += self._upsert_capabilities_for_elements(
                 station=station,
-                tracked_elements=set(TARGET_ELEMENTS),
+                tracked_elements=SNOW_DEPTH_ELEMENT_IDS,
                 available_elements={SURFACE_SNOW_THICKNESS_ELEMENT},
             )
 
@@ -398,6 +398,7 @@ class SyncService:
         now = datetime.now(timezone.utc)
         written = 0
         latest_updates = 0
+        capability_cache: dict[int, dict[str, StationCapability]] = {}
 
         sorted_rows = sorted(
             observation_rows,
@@ -477,6 +478,13 @@ class SyncService:
                 existing.quality_code = quality_code
                 existing.fetched_at = now
 
+                self._mark_capability_available(
+                    station=station,
+                    element_id=element_id,
+                    observed_at=now,
+                    capability_cache=capability_cache,
+                )
+
                 normalized_item = dict(item)
                 normalized_item["value"] = normalized_value
                 normalized_item["qualityCode"] = quality_code
@@ -493,6 +501,40 @@ class SyncService:
                 latest_updates += 1
 
         return written, latest_updates
+
+    def _mark_capability_available(
+        self,
+        station: Station,
+        element_id: str,
+        observed_at: datetime,
+        capability_cache: dict[int, dict[str, StationCapability]],
+    ) -> None:
+        capabilities = capability_cache.get(station.id)
+        if capabilities is None:
+            capabilities = {
+                capability.element_id: capability
+                for capability in self.session.execute(
+                    select(StationCapability).where(StationCapability.station_id == station.id)
+                ).scalars()
+            }
+            capability_cache[station.id] = capabilities
+
+        capability = capabilities.get(element_id)
+        if capability is None:
+            capability = StationCapability(
+                station_id=station.id,
+                element_id=element_id,
+                available=True,
+                first_seen_at=observed_at,
+                last_seen_at=observed_at,
+            )
+            self.session.add(capability)
+            capabilities[element_id] = capability
+            return
+
+        capability.last_seen_at = observed_at
+        if not capability.available:
+            capability.available = True
 
     def _refresh_latest_window_metrics(self, latest: StationLatest, station: Station) -> None:
         observed_at = _ensure_utc(latest.observed_at)

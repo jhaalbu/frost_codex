@@ -966,39 +966,18 @@ def _parameter_profile_properties(capability_flags: dict[str, bool]) -> dict[str
 
 
 def _parameter_profile_name(capability_flags: dict[str, bool]) -> str:
-    weather_groups = {
-        "temperature": capability_flags.get("has_air_temperature", False),
-        "precipitation": capability_flags.get("has_precipitation_1h", False),
-        "wind": capability_flags.get("has_wind_speed", False) or capability_flags.get("has_wind_from_direction", False),
-        "snow": capability_flags.get("has_snow_depth", False),
-    }
-    hydrology_groups = {
-        "discharge": capability_flags.get("has_discharge", False),
-        "groundwater": capability_flags.get("has_groundwater_level", False),
-    }
+    has_temperature = capability_flags.get("has_air_temperature", False)
+    has_precipitation = capability_flags.get("has_precipitation_1h", False)
+    has_wind = capability_flags.get("has_wind_speed", False) or capability_flags.get("has_wind_from_direction", False)
+    has_snow = capability_flags.get("has_snow_depth", False)
 
-    weather_present = [name for name, present in weather_groups.items() if present]
-    hydrology_present = [name for name, present in hydrology_groups.items() if present]
-
-    if len(weather_present) == 4 and not hydrology_present:
+    if has_temperature and has_precipitation and has_wind and has_snow:
         return "complete"
-    if len(weather_present) == 4 and hydrology_present:
-        return "complete_plus_hydrology"
-    if set(weather_present) == {"temperature", "precipitation", "wind"}:
+    if has_temperature and has_precipitation and has_wind:
         return "weather"
-    if set(weather_present) == {"temperature", "wind", "snow"}:
-        return "snow_weather"
-    if set(hydrology_present) == {"discharge", "groundwater"} and not weather_present:
-        return "hydrology_complete"
-    if len(weather_present) == 1 and not hydrology_present:
-        return weather_present[0]
-    if len(hydrology_present) == 1 and not weather_present:
-        return hydrology_present[0]
-    if not weather_present and not hydrology_present:
-        return "metadata_only"
-    if weather_present or hydrology_present:
-        return "_".join(weather_present + hydrology_present)
-    return "other"
+    if has_snow:
+        return "snow"
+    return "lesser"
 
 
 def _station_properties(station: Station) -> dict[str, Any]:
