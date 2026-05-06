@@ -17,6 +17,13 @@ TARGET_ELEMENTS = [
     "wind_speed",
 ]
 
+LATEST_SYNC_ELEMENTS = [
+    "air_temperature",
+    "sum(precipitation_amount PT1H)",
+    "wind_from_direction",
+    "wind_speed",
+]
+
 
 @dataclass(frozen=True)
 class FrostSource:
@@ -112,7 +119,7 @@ class FrostClient:
             {
                 "sources": source_value,
                 "referencetime": "latest",
-                "elements": ",".join(TARGET_ELEMENTS),
+                "elements": ",".join(LATEST_SYNC_ELEMENTS),
                 "qualities": self.acceptable_quality_codes,
                 "timeoffsets": "default",
                 "levels": "default",

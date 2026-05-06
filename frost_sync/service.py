@@ -140,7 +140,11 @@ class SyncService:
         observable_source_ids = [
             source.source_id
             for source in sources
-            if any(source.source_id in source_ids for source_ids in capability_source_ids.values())
+            if any(
+                source.source_id in source_ids
+                for element_id, source_ids in capability_source_ids.items()
+                if element_id not in SNOW_DEPTH_ELEMENT_IDS
+            )
         ]
 
         snow_capable_source_ids: set[str] = set()
