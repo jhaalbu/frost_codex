@@ -15,7 +15,6 @@ TARGET_ELEMENTS = [
     "snow_depth",
     "wind_from_direction",
     "wind_speed",
-    "max(wind_speed_of_gust PT10M)",
 ]
 
 
