@@ -515,7 +515,11 @@ class SyncService:
                 if quality_code is not None and quality_code >= 5:
                     continue
 
-                normalized_value = _normalize_observation_value(element_id, item.get("value"))
+                normalized_value = _normalize_observation_value(
+                    station=station,
+                    element_id=element_id,
+                    value=item.get("value"),
+                )
                 if normalized_value is None and element_id in SNOW_DEPTH_ELEMENT_IDS:
                     continue
                 if element_id in PRECIPITATION_ELEMENT_IDS and road_station_precipitation_is_suspect:
@@ -815,7 +819,11 @@ def _observation_value_for_element(observations: list[dict], element_id: str) ->
         quality_code = _extract_quality_code(item.get("qualityCode"))
         if quality_code is not None and quality_code >= 5:
             continue
-        return _normalize_observation_value(element_id, item.get("value"))
+        return _normalize_observation_value(
+            station=None,
+            element_id=element_id,
+            value=item.get("value"),
+        )
     return None
 
 
@@ -963,7 +971,11 @@ def _snow_depth_change(rows: list[Observation]) -> float | None:
     return last_row.value - comparison_row.value
 
 
-def _normalize_observation_value(element_id: str, value: float | int | None) -> float | None:
+def _normalize_observation_value(
+    station: Station | None,
+    element_id: str,
+    value: float | int | None,
+) -> float | None:
     if value is None:
         return None
     try:
@@ -972,6 +984,11 @@ def _normalize_observation_value(element_id: str, value: float | int | None) -> 
         return None
 
     if element_id in SNOW_DEPTH_ELEMENT_IDS:
+        if station is not None and station.provider == "nve_hydapi":
+            if numeric_value < 0:
+                return 0.0
+            if numeric_value > 1000:
+                return None
         if numeric_value == -1:
             return 0.0
         if numeric_value <= -3:
