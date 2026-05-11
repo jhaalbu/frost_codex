@@ -121,6 +121,8 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
         for station, latest in rows:
             if station.longitude is None or station.latitude is None:
                 continue
+            if _is_suspect_nve_feature(station, latest):
+                continue
 
             capability_flags = capabilities.get(station.id, {})
             if has_filter and not _matches_has_filter(has_filter, capability_flags, latest):
@@ -1026,6 +1028,33 @@ def _matches_has_filter(has_filter: str, capability_flags: dict[str, bool], late
         return capability_flags.get(flag_name, False) and latest.snow_depth is not None
 
     return capability_flags.get(flag_name, False)
+
+
+def _is_suspect_nve_feature(station: Station, latest: StationLatest) -> bool:
+    if station.provider != "nve_hydapi":
+        return False
+
+    if station.longitude is None or station.latitude is None:
+        return True
+
+    in_norway_bounds = 4.0 <= station.longitude <= 32.0 and 57.0 <= station.latitude <= 72.5
+    if not in_norway_bounds:
+        return True
+
+    if latest.precipitation_1h is not None and (latest.precipitation_1h < 0 or latest.precipitation_1h > 300):
+        return True
+    if latest.snow_depth is not None and (latest.snow_depth < -5 or latest.snow_depth > 1000):
+        return True
+    if latest.air_temperature is not None and (latest.air_temperature < -60 or latest.air_temperature > 60):
+        return True
+    if latest.wind_speed is not None and (latest.wind_speed < 0 or latest.wind_speed > 100):
+        return True
+    if latest.discharge is not None and latest.discharge < 0:
+        return True
+    if latest.groundwater_level is not None and latest.groundwater_level < -100:
+        return True
+
+    return False
 
 
 def _parameter_profile_properties(capability_flags: dict[str, bool]) -> dict[str, Any]:
