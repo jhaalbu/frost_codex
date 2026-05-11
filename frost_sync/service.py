@@ -776,6 +776,9 @@ def _extract_quality_code(value: int | str | None) -> int | None:
 
 
 def _is_suspect_road_station_precipitation(station: Station, row: dict) -> bool:
+    if station.provider == "nve_hydapi":
+        return _is_suspect_nve_precipitation(row)
+
     if not _is_road_stationholder(station.stationholder):
         return False
 
@@ -785,6 +788,17 @@ def _is_suspect_road_station_precipitation(station: Station, row: dict) -> bool:
         precipitation_1h = _observation_value_for_element(observations, PRECIPITATION_1H_ELEMENT)
 
     return precipitation_1h is not None and precipitation_1h > 5.0
+
+
+def _is_suspect_nve_precipitation(row: dict) -> bool:
+    observations = row.get("observations", [])
+    precipitation_1h = _observation_value_for_element(observations, PRECIPITATION_ELEMENT)
+    if precipitation_1h is None:
+        precipitation_1h = _observation_value_for_element(observations, PRECIPITATION_1H_ELEMENT)
+
+    if precipitation_1h is None:
+        return False
+    return precipitation_1h < 0 or precipitation_1h > 5.0
 
 
 def _is_road_stationholder(stationholder: str | None) -> bool:
@@ -811,6 +825,12 @@ def _filter_suspect_road_station_precipitation(
 ) -> list[Observation]:
     filtered: list[Observation] = []
     for row in precipitation_rows:
+        if (
+            station.provider == "nve_hydapi"
+            and row.value is not None
+            and (row.value < 0 or row.value > 5.0)
+        ):
+            continue
         if (
             _is_road_stationholder(station.stationholder)
             and
@@ -916,11 +936,31 @@ def _max_rolling_sum_with_end(rows: list[Observation], hours: int) -> tuple[floa
 def _snow_depth_change(rows: list[Observation]) -> float | None:
     if len(rows) < 2:
         return None
-    first_row = rows[0]
     last_row = rows[-1]
-    if first_row.value is None or last_row.value is None:
+    if last_row.value is None:
         return None
-    return last_row.value - first_row.value
+
+    last_time = _ensure_utc(last_row.reference_time)
+    if last_time is None:
+        return None
+
+    target_time = last_time - timedelta(hours=24)
+    candidates = [
+        row
+        for row in rows[:-1]
+        if row.value is not None and _ensure_utc(row.reference_time) is not None
+    ]
+    if not candidates:
+        return None
+
+    comparison_row = min(
+        candidates,
+        key=lambda row: abs(((_ensure_utc(row.reference_time) or target_time) - target_time).total_seconds()),
+    )
+    if comparison_row.value is None:
+        return None
+
+    return last_row.value - comparison_row.value
 
 
 def _normalize_observation_value(element_id: str, value: float | int | None) -> float | None:
