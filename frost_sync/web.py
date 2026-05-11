@@ -12,6 +12,7 @@ from frost_sync.db import create_session_factory
 from frost_sync.frost_api import FrostClient
 from frost_sync.models import Observation, Station, StationCapability, StationLatest
 from frost_sync.nve_hydapi import NveHydApiClient
+from frost_sync.snower_api import SnowerClient
 
 
 PARAMETER_DEFINITIONS = {
@@ -25,6 +26,7 @@ PARAMETER_DEFINITIONS = {
     },
     "precipitation_1h": {"label": "Nedbor siste time", "unit": "mm", "element_ids": ["sum(precipitation_amount PT1H)", "precipitation_1h"], "style": "column"},
     "precipitation_24h_rolling": {"label": "Rullande nedbor siste 24 timer", "unit": "mm", "element_ids": [], "style": "line"},
+    "precipitation_accumulated": {"label": "Akkumulert nedbor", "unit": "mm", "element_ids": [], "style": "line"},
     "snow_depth": {"label": "Snodybde", "unit": "cm", "element_ids": ["snow_depth", "surface_snow_thickness"], "style": "line"},
     "wind_from_direction": {
         "label": "Vindretning",
@@ -87,6 +89,13 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
         api_key=settings.nve_hydapi_key,
         timeout_seconds=settings.request_timeout_seconds,
     ) if settings.nve_hydapi_key else None
+    snower_client = SnowerClient(
+        base_url=settings.snower_base_url,
+        username=settings.snower_username,
+        password=settings.snower_password,
+        domain_id=settings.snower_domain_id,
+        timeout_seconds=settings.request_timeout_seconds,
+    ) if settings.snower_username and settings.snower_password and settings.snower_domain_id else None
     blueprint = Blueprint(name, __name__)
 
     @blueprint.get("/health")
@@ -322,6 +331,19 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                 )
             except RuntimeError as exc:
                 abort(502, description=str(exc))
+        elif station_provider == "snower":
+            if snower_client is None:
+                abort(503, description="Snower client is not configured")
+            try:
+                normalized_rows = _fetch_snower_timeseries_rows(
+                    snower_client=snower_client,
+                    station=station,
+                    parameter_ids=parameter_ids,
+                    from_dt=from_dt,
+                    to_dt=to_dt,
+                )
+            except RuntimeError as exc:
+                abort(502, description=str(exc))
         else:
             abort(400, description=f"Unsupported provider: {station_provider}")
 
@@ -462,10 +484,28 @@ def _fetch_nve_timeseries_rows(
     )
 
 
+def _fetch_snower_timeseries_rows(
+    snower_client: SnowerClient,
+    station: Station,
+    parameter_ids: list[str],
+    from_dt: datetime,
+    to_dt: datetime,
+) -> list[dict[str, Any]]:
+    supported = [parameter_id for parameter_id in parameter_ids if parameter_id in {"air_temperature", "snow_depth"}]
+    if not supported:
+        return []
+    return snower_client.fetch_observations_range(
+        provider_context=station.provider_context,
+        from_dt=from_dt,
+        to_dt=to_dt,
+        logical_parameter_ids=supported,
+    )
+
+
 def _direct_observation_element_ids(parameter_ids: list[str]) -> set[str]:
     element_ids: set[str] = set()
     for parameter_id in parameter_ids:
-        if parameter_id == "precipitation_24h_rolling":
+        if parameter_id in {"precipitation_24h_rolling", "precipitation_accumulated"}:
             element_ids.update(PARAMETER_DEFINITIONS["precipitation_1h"]["element_ids"])
             continue
         definition = PARAMETER_DEFINITIONS[parameter_id]
@@ -490,6 +530,8 @@ def _build_direct_series_payload(
     definition = PARAMETER_DEFINITIONS[parameter_id]
     if parameter_id == "precipitation_24h_rolling":
         points = _build_precipitation_rolling_points(rows, from_dt, to_dt)
+    elif parameter_id == "precipitation_accumulated":
+        points = _build_precipitation_accumulated_points(rows, from_dt, to_dt)
     else:
         points = _build_series_points(parameter_id, definition, rows, from_dt, to_dt, provider)
     return {
@@ -590,6 +632,35 @@ def _build_precipitation_rolling_points(
             }
         )
     return rolling_points
+
+
+def _build_precipitation_accumulated_points(
+    rows: list[dict[str, Any]],
+    from_dt: datetime,
+    to_dt: datetime,
+) -> list[dict[str, Any]]:
+    points = _build_direct_points(
+        parameter_id="precipitation_1h",
+        element_ids=PARAMETER_DEFINITIONS["precipitation_1h"]["element_ids"],
+        rows=rows,
+        from_dt=from_dt,
+        to_dt=to_dt,
+    )
+    accumulated = 0.0
+    accumulated_points: list[dict[str, Any]] = []
+    for point in points:
+        if point["value"] is None:
+            continue
+        accumulated += float(point["value"])
+        accumulated_points.append(
+            {
+                "time": point["time"],
+                "value": accumulated,
+                "quality_code": point.get("quality_code"),
+                "element_id": "precipitation_accumulated",
+            }
+        )
+    return accumulated_points
 
 
 def _format_timeseries_point(point: dict[str, Any]) -> dict[str, Any]:

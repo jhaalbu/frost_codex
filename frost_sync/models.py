@@ -15,6 +15,7 @@ class Station(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     provider: Mapped[str] = mapped_column(String(32), nullable=False, default="frost", index=True)
+    provider_context: Mapped[Optional[str]] = mapped_column(String(2048))
     name: Mapped[Optional[str]] = mapped_column(String(255))
     stationholder: Mapped[Optional[str]] = mapped_column(String(512))
     country: Mapped[Optional[str]] = mapped_column(String(8), index=True)

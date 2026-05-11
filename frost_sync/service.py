@@ -17,6 +17,7 @@ from frost_sync.nve_hydapi import (
     NveHydApiSeriesSpec,
     NveHydApiStation,
 )
+from frost_sync.snower_api import SnowerClient, SnowerMonitor
 
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,11 @@ NVE_TARGET_ELEMENTS = {
     GROUNDWATER_LEVEL_ELEMENT,
 }
 
+SNOWER_TARGET_ELEMENTS = {
+    AIR_TEMPERATURE_ELEMENT,
+    SNOW_DEPTH_ELEMENT,
+}
+
 
 @dataclass(frozen=True)
 class SyncSummary:
@@ -72,10 +78,12 @@ class SyncService:
         session: Session,
         frost_client: FrostClient,
         nve_hydapi_client: NveHydApiClient | None = None,
+        snower_client: SnowerClient | None = None,
     ) -> None:
         self.session = session
         self.frost_client = frost_client
         self.nve_hydapi_client = nve_hydapi_client
+        self.snower_client = snower_client
 
     def run_hourly_sync(
         self,
@@ -86,6 +94,7 @@ class SyncService:
         sources = self.frost_client.fetch_sources(page_limit=page_limit)
         stations_by_source = self._upsert_stations(sources)
         nve_station_count = 0
+        snower_station_count = 0
         nve_series_specs: list[NveHydApiSeriesSpec] = []
         nve_station_ids_by_element: dict[str, set[str]] = {}
         if self.nve_hydapi_client is not None:
@@ -96,6 +105,14 @@ class SyncService:
             if not nve_series_specs:
                 nve_series_specs = self.nve_hydapi_client.fetch_series_specs()
             nve_station_ids_by_element = self._nve_station_ids_by_element(nve_series_specs)
+        snower_monitors: list[SnowerMonitor] = []
+        if self.snower_client is not None:
+            try:
+                snower_monitors = self.snower_client.fetch_stations()
+                self._upsert_snower_stations(snower_monitors)
+                snower_station_count = len(snower_monitors)
+            except Exception as exc:
+                logger.warning("Failed to discover Snower monitors: %s", exc)
         capability_source_ids = {
             element_id: self.frost_client.fetch_capability_source_ids(element_id)
             for element_id in TARGET_ELEMENTS
@@ -133,6 +150,17 @@ class SyncService:
                     station=station,
                     tracked_elements=NVE_TARGET_ELEMENTS,
                     available_elements=available_elements,
+                )
+
+        if snower_monitors:
+            snower_station_rows = self.session.execute(
+                select(Station).where(Station.provider == "snower")
+            ).scalars().all()
+            for station in snower_station_rows:
+                capabilities_updated += self._upsert_capabilities_for_elements(
+                    station=station,
+                    tracked_elements=SNOWER_TARGET_ELEMENTS,
+                    available_elements=set(),
                 )
 
         self.session.commit()
@@ -196,11 +224,28 @@ class SyncService:
                 logger.exception("Failed to sync NVE HydAPI observations: %s", exc)
                 station_errors += len(nve_series_specs)
 
+        if snower_monitors:
+            try:
+                snower_stations_by_source = {
+                    station.source_id: station
+                    for station in self.session.execute(
+                        select(Station).where(Station.provider == "snower")
+                    ).scalars()
+                }
+                snower_rows = self.snower_client.fetch_latest_observations(snower_monitors)
+                snower_written, snower_latest = self._store_observations_batch(snower_stations_by_source, snower_rows)
+                observations_written += snower_written
+                latest_updated += snower_latest
+            except Exception as exc:
+                self.session.rollback()
+                logger.exception("Failed to sync Snower observations: %s", exc)
+                station_errors += len(snower_monitors)
+
         observations_deleted = self._prune_old_observations(retention_days)
         self.session.commit()
 
         return SyncSummary(
-            stations_seen=len(sources) + nve_station_count,
+            stations_seen=len(sources) + nve_station_count + snower_station_count,
             capabilities_updated=capabilities_updated,
             observations_written=observations_written,
             latest_updated=latest_updated,
@@ -340,6 +385,33 @@ class SyncService:
             station.county = source.county
             station.municipality = source.municipality
             station.masl = source.masl
+            station.longitude = source.longitude
+            station.latitude = source.latitude
+            station.last_seen_at = now
+
+    def _upsert_snower_stations(self, monitors: Iterable[SnowerMonitor]) -> None:
+        now = datetime.now(timezone.utc)
+        source_ids = [monitor.source_id for monitor in monitors]
+        if not source_ids:
+            return
+
+        existing = self.session.execute(
+            select(Station).where(Station.source_id.in_(source_ids))
+        ).scalars().all()
+        existing_by_source = {station.source_id: station for station in existing}
+
+        for source in monitors:
+            station = existing_by_source.get(source.source_id)
+            if station is None:
+                station = Station(source_id=source.source_id, last_seen_at=now)
+                self.session.add(station)
+                existing_by_source[source.source_id] = station
+
+            station.provider = "snower"
+            station.provider_context = source.provider_context
+            station.name = source.name
+            station.stationholder = "Snower"
+            station.country = station.country or "FI"
             station.longitude = source.longitude
             station.latitude = source.latitude
             station.last_seen_at = now

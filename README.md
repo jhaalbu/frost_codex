@@ -1,14 +1,14 @@
 # Frost station sync prototype
 
 This project syncs weather observations from MET Norway's Frost API for all Norwegian stations and exposes the data through a small Flask API that fits ArcGIS/web map use cases.
-It can also import station metadata and selected latest observations from NVE HydAPI when an NVE API key is configured.
+It can also import station metadata and selected latest observations from NVE HydAPI and Snower when those integrations are configured.
 
 The local development setup uses SQLite by default. The code is structured so the same service can later run on PythonAnywhere with MySQL by changing the database URL.
 
 ## What it stores
 
-- `stations`: metadata and coordinates for Norwegian stations
-  Includes `provider`, so stations can come from `frost` or `nve_hydapi`
+- `stations`: metadata and coordinates for stations
+  Includes `provider`, so stations can come from `frost`, `nve_hydapi` or `snower`
 - `station_capabilities`: which supported elements each station exposes
 - `observations`: history table with one row per element and timestamp
 - `station_latest`: one row per station with latest values for map display, including rolling precipitation for the last 24 hours, plus hydrology fields like `discharge` and `groundwater_level`
@@ -37,6 +37,9 @@ Or create a `.env` file in the project root:
 FROST_CLIENT_ID=your-client-id
 DATABASE_URL=sqlite:///frost_arcgis.db
 NVE_HYDAPI_KEY=your-nve-api-key
+SNOWER_USERNAME=your-snower-username
+SNOWER_PASSWORD=your-snower-password
+SNOWER_DOMAIN_ID=your-snower-domain-id
 FROST_SOURCE_BATCH_SIZE=25
 FROST_RETENTION_DAYS=14
 ```
@@ -72,11 +75,11 @@ flask --app app run --host 127.0.0.1 --port 5000
 - `GET /api/stations/SN18700/timeseries?parameters=air_temperature,precipitation_1h,precipitation_24h_rolling&from=2026-05-04T00:00:00Z&to=2026-05-05T23:59:59Z`
 
 The `latest.geojson` endpoint is the best starting point for ArcGIS map display because it returns one feature per station with the latest values already flattened into fields.
-It includes both `precipitation_1h` and rolling `precipitation_24h`, and can also include `discharge` and `groundwater_level` for NVE HydAPI stations.
+It includes both `precipitation_1h` and rolling `precipitation_24h`, and can also include `discharge` and `groundwater_level` for NVE HydAPI stations, plus `snow_depth` and mapped temperature values from Snower monitors.
 To make ArcGIS symbolization easier, the endpoint also includes `available_parameter_count` and `parameter_profile`.
 
 The `timeseries` endpoint is meant for plotting in applications like VertiGIS/Highcharts.
-It fetches data directly from Frost or NVE HydAPI instead of reading the local history table, so you can request longer periods without having to keep all plotting data in the local database.
+It fetches data directly from Frost, NVE HydAPI or Snower instead of reading the local history table, so you can request longer periods without having to keep all plotting data in the local database.
 The only derived plotting series currently exposed is `precipitation_24h_rolling`, which is calculated from hourly precipitation values returned by the provider.
 For Frost plotting, the endpoint now prefers hourly series such as `mean(air_temperature PT1H)`, `mean(wind_speed PT1H)`, `mean(wind_from_direction PT1H)` and `max(wind_speed_of_gust PT1H)`.
 If a station does not expose those hourly Frost elements, the API falls back to raw observations and aggregates them to hourly values before returning the series.
@@ -129,6 +132,9 @@ pip install -r /home/yourusername/frost_codex/requirements.txt
 FROST_CLIENT_ID=your-frost-client-id
 DATABASE_URL=mysql+pymysql://yourusername:your-mysql-password@your-mysql-host/yourusername$weather?charset=utf8mb4
 NVE_HYDAPI_KEY=your-nve-hydapi-key
+SNOWER_USERNAME=your-snower-username
+SNOWER_PASSWORD=your-snower-password
+SNOWER_DOMAIN_ID=your-snower-domain-id
 FROST_TIMEOUT_SECONDS=60
 FROST_PAGE_LIMIT=1000
 FROST_SOURCE_BATCH_SIZE=25
@@ -161,6 +167,7 @@ mysql+pymysql://yourusername:your-mysql-password@your-mysql-host/yourusername$we
 
 - Frost API authentication uses the client ID as the username and an empty password.
 - NVE HydAPI requires an API key in the `X-API-Key` header; station and latest observation sync is enabled only when `NVE_HYDAPI_KEY` is set.
+- Snower requires `SNOWER_USERNAME`, `SNOWER_PASSWORD` and `SNOWER_DOMAIN_ID`; the integration authenticates through `POST /login` and then uses `authentication-key` and `domain-id` headers for the remaining calls.
 - The sync uses `sources` and `observations` endpoints.
 - Some stations do not have all requested elements, so capability tracking is stored separately from observation values.
 - If a `.env` file exists in the project root, it is loaded automatically.

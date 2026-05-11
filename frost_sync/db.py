@@ -31,6 +31,8 @@ def upgrade_schema(database_url: str) -> None:
         station_columns = {column["name"] for column in inspector.get_columns("stations")}
         if "provider" not in station_columns:
             ddl_statements.append("ALTER TABLE stations ADD COLUMN provider VARCHAR(32) NOT NULL DEFAULT 'frost'")
+        if "provider_context" not in station_columns:
+            ddl_statements.append("ALTER TABLE stations ADD COLUMN provider_context VARCHAR(2048)")
         if "stationholder" not in station_columns:
             ddl_statements.append("ALTER TABLE stations ADD COLUMN stationholder VARCHAR(512)")
 

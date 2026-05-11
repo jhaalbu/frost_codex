@@ -8,6 +8,7 @@ from frost_sync.db import create_schema, create_session_factory
 from frost_sync.frost_api import FrostClient
 from frost_sync.nve_hydapi import NveHydApiClient
 from frost_sync.service import SyncService
+from frost_sync.snower_api import SnowerClient
 
 
 def main() -> None:
@@ -49,12 +50,22 @@ def main() -> None:
                 api_key=settings.nve_hydapi_key,
                 timeout_seconds=settings.request_timeout_seconds,
             )
+        snower_client = None
+        if settings.snower_username and settings.snower_password and settings.snower_domain_id:
+            snower_client = SnowerClient(
+                base_url=settings.snower_base_url,
+                username=settings.snower_username,
+                password=settings.snower_password,
+                domain_id=settings.snower_domain_id,
+                timeout_seconds=settings.request_timeout_seconds,
+            )
 
         with session_factory() as session:
             service = SyncService(
                 session=session,
                 frost_client=frost_client,
                 nve_hydapi_client=nve_hydapi_client,
+                snower_client=snower_client,
             )
             summary = service.run_hourly_sync(
                 page_limit=settings.page_limit,
