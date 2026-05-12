@@ -653,6 +653,25 @@ class SyncService:
             [row for row in rows if row.element_id in SNOW_DEPTH_ELEMENT_IDS and row.value is not None],
             key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
         )
+        snow_observed_at = (
+            _ensure_utc(snow_depth_rows[-1].reference_time) if snow_depth_rows else None
+        )
+        snow_change_rows = (
+            self.session.execute(
+                select(Observation).where(
+                    Observation.station_id == station.id,
+                    Observation.reference_time >= (snow_observed_at or observed_at) - timedelta(days=7),
+                    Observation.reference_time <= (snow_observed_at or observed_at),
+                    Observation.element_id.in_(sorted(SNOW_DEPTH_ELEMENT_IDS)),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        snow_change_rows = sorted(
+            [row for row in snow_change_rows if row.value is not None],
+            key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
+        )
         wind_speed_rows = [row for row in rows if row.element_id == WIND_SPEED_ELEMENT and row.value is not None]
         wind_direction_rows = {
             _ensure_utc(row.reference_time): row
@@ -685,8 +704,8 @@ class SyncService:
         latest.air_temperature_max_unit = _first_unit(temperature_rows)
         latest.air_temperature_max_time = _instant_time(air_temperature_max_row)
 
-        latest.snow_depth_change = _snow_depth_change(snow_depth_rows)
-        latest.snow_depth_change_unit = _first_unit(snow_depth_rows) if latest.snow_depth_change is not None else None
+        latest.snow_depth_change = _snow_depth_change(snow_change_rows)
+        latest.snow_depth_change_unit = _first_unit(snow_change_rows) if latest.snow_depth_change is not None else None
 
         wind_speed_max_row = _max_row(wind_speed_rows)
         if wind_speed_max_row is None:
@@ -952,6 +971,16 @@ def _snow_depth_change(rows: list[Observation]) -> float | None:
     if last_time is None:
         return None
 
+    recent_rows = [
+        row
+        for row in rows
+        if row.value is not None
+        and (row_time := _ensure_utc(row.reference_time)) is not None
+        and row_time >= last_time - timedelta(hours=24)
+    ]
+    if last_row.value <= 0 and not any((row.value or 0) > 0 for row in recent_rows):
+        return None
+
     target_time = last_time - timedelta(hours=24)
     candidates = [
         row
@@ -961,10 +990,27 @@ def _snow_depth_change(rows: list[Observation]) -> float | None:
     if not candidates:
         return None
 
-    comparison_row = min(
-        candidates,
-        key=lambda row: abs(((_ensure_utc(row.reference_time) or target_time) - target_time).total_seconds()),
-    )
+    comparison_window = [
+        row
+        for row in candidates
+        if abs(((_ensure_utc(row.reference_time) or target_time) - target_time).total_seconds()) <= 12 * 3600
+    ]
+    if comparison_window:
+        comparison_row = min(
+            comparison_window,
+            key=lambda row: abs(((_ensure_utc(row.reference_time) or target_time) - target_time).total_seconds()),
+        )
+    else:
+        older_candidates = [
+            row for row in candidates if (_ensure_utc(row.reference_time) or target_time) <= target_time
+        ]
+        if older_candidates:
+            comparison_row = max(
+                older_candidates,
+                key=lambda row: (_ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc)),
+            )
+        else:
+            comparison_row = candidates[0]
     if comparison_row.value is None:
         return None
 
