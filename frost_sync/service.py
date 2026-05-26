@@ -607,6 +607,7 @@ class SyncService:
         written = 0
         latest_updates = 0
         capability_cache: dict[int, dict[str, StationCapability]] = {}
+        observation_cache: dict[tuple[int, datetime, str], Observation] = {}
         stations_to_refresh: dict[int, tuple[StationLatest, Station]] = {}
 
         sorted_rows = sorted(
@@ -666,23 +667,29 @@ class SyncService:
                         has_latest_change = True
                     continue
 
-                existing = self.session.execute(
-                    select(Observation).where(
-                        Observation.station_id == station.id,
-                        Observation.reference_time == reference_time,
-                        Observation.element_id == element_id,
-                    )
-                ).scalar_one_or_none()
-
+                observation_key = (station.id, reference_time, element_id)
+                existing = observation_cache.get(observation_key)
                 if existing is None:
-                    existing = Observation(
-                        station_id=station.id,
-                        reference_time=reference_time,
-                        element_id=element_id,
-                        fetched_at=now,
-                    )
-                    self.session.add(existing)
-                    written += 1
+                    with self.session.no_autoflush:
+                        existing = self.session.execute(
+                            select(Observation).where(
+                                Observation.station_id == station.id,
+                                Observation.reference_time == reference_time,
+                                Observation.element_id == element_id,
+                            )
+                        ).scalar_one_or_none()
+
+                    if existing is None:
+                        existing = Observation(
+                            station_id=station.id,
+                            reference_time=reference_time,
+                            element_id=element_id,
+                            fetched_at=now,
+                        )
+                        self.session.add(existing)
+                        written += 1
+
+                    observation_cache[observation_key] = existing
 
                 existing.value = normalized_value
                 existing.unit = item.get("unit")
