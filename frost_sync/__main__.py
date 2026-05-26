@@ -70,6 +70,7 @@ def main() -> None:
             summary = service.run_hourly_sync(
                 page_limit=settings.page_limit,
                 source_batch_size=settings.source_batch_size,
+                fetch_concurrency=settings.fetch_concurrency,
                 retention_days=settings.retention_days,
             )
 

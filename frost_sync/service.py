@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -89,6 +90,7 @@ class SyncService:
         self,
         page_limit: int,
         source_batch_size: int = 100,
+        fetch_concurrency: int = 1,
         retention_days: int = 14,
     ) -> SyncSummary:
         sources = self.frost_client.fetch_sources(page_limit=page_limit)
@@ -177,14 +179,15 @@ class SyncService:
 
         snow_capable_source_ids: set[str] = set()
 
-        for source_id_batch in _chunked(observable_source_ids, source_batch_size):
-            batch_written, batch_latest, batch_errors = self._sync_observation_batch(
-                stations_by_source=stations_by_source,
-                source_id_batch=source_id_batch,
-            )
-            observations_written += batch_written
-            latest_updated += batch_latest
-            station_errors += batch_errors
+        batch_written, batch_latest, batch_errors = self._sync_observation_batches(
+            stations_by_source=stations_by_source,
+            source_ids=observable_source_ids,
+            source_batch_size=source_batch_size,
+            fetch_concurrency=fetch_concurrency,
+        )
+        observations_written += batch_written
+        latest_updated += batch_latest
+        station_errors += batch_errors
 
         snow_written, snow_latest, snow_errors = self._sync_snow_observations(
             stations_by_source=stations_by_source,
@@ -293,20 +296,107 @@ class SyncService:
         stations_by_source: dict[str, Station],
         source_id_batch: list[str],
     ) -> tuple[int, int, int]:
+        observation_rows, batch_errors = self._fetch_observation_rows(source_id_batch)
+        if batch_errors and not observation_rows:
+            return 0, 0, batch_errors
+
         try:
-            observation_rows = self.frost_client.fetch_latest_observations(source_id_batch)
             batch_written, batch_latest = self._store_observations_batch(stations_by_source, observation_rows)
             self.session.commit()
-            return batch_written, batch_latest, 0
+            return batch_written, batch_latest, batch_errors
         except Exception as exc:
             self.session.rollback()
+            logger.exception(
+                "Failed to store observations for batch of %s sources. First source=%s. Error=%s",
+                len(source_id_batch),
+                source_id_batch[0] if source_id_batch else None,
+                exc,
+            )
+            return 0, 0, len(source_id_batch)
+
+    def _sync_observation_batches(
+        self,
+        stations_by_source: dict[str, Station],
+        source_ids: list[str],
+        source_batch_size: int,
+        fetch_concurrency: int,
+    ) -> tuple[int, int, int]:
+        written = 0
+        latest = 0
+        errors = 0
+        source_batches = list(_chunked(source_ids, source_batch_size))
+
+        if fetch_concurrency <= 1 or len(source_batches) <= 1:
+            for source_id_batch in source_batches:
+                batch_written, batch_latest, batch_errors = self._sync_observation_batch(
+                    stations_by_source=stations_by_source,
+                    source_id_batch=source_id_batch,
+                )
+                written += batch_written
+                latest += batch_latest
+                errors += batch_errors
+            return written, latest, errors
+
+        logger.info(
+            "Fetching Frost latest observations with concurrency=%s across %s batches",
+            fetch_concurrency,
+            len(source_batches),
+        )
+        with ThreadPoolExecutor(max_workers=fetch_concurrency) as executor:
+            futures = {
+                executor.submit(self._fetch_observation_rows, source_id_batch): source_id_batch
+                for source_id_batch in source_batches
+            }
+            for future in as_completed(futures):
+                source_id_batch = futures[future]
+                try:
+                    observation_rows, batch_errors = future.result()
+                except Exception as exc:
+                    logger.exception(
+                        "Unexpected failure while fetching batch of %s sources. First source=%s. Error=%s",
+                        len(source_id_batch),
+                        source_id_batch[0] if source_id_batch else None,
+                        exc,
+                    )
+                    errors += len(source_id_batch)
+                    continue
+
+                errors += batch_errors
+                if not observation_rows:
+                    continue
+
+                try:
+                    batch_written, batch_latest = self._store_observations_batch(
+                        stations_by_source,
+                        observation_rows,
+                    )
+                    self.session.commit()
+                    written += batch_written
+                    latest += batch_latest
+                except Exception as exc:
+                    self.session.rollback()
+                    logger.exception(
+                        "Failed to store fetched Frost batch of %s sources. First source=%s. Error=%s",
+                        len(source_id_batch),
+                        source_id_batch[0] if source_id_batch else None,
+                        exc,
+                    )
+                    errors += len(source_id_batch)
+
+        return written, latest, errors
+
+    def _fetch_observation_rows(self, source_id_batch: list[str]) -> tuple[list[dict], int]:
+        try:
+            observation_rows = self.frost_client.fetch_latest_observations(source_id_batch)
+            return observation_rows, 0
+        except Exception as exc:
             if len(source_id_batch) == 1:
                 logger.exception(
-                    "Failed to sync observations for source %s: %s",
+                    "Failed to fetch observations for source %s: %s",
                     source_id_batch[0],
                     exc,
                 )
-                return 0, 0, 1
+                return [], 1
 
             midpoint = len(source_id_batch) // 2
             logger.warning(
@@ -315,19 +405,9 @@ class SyncService:
                 source_id_batch[0],
                 exc,
             )
-            left_written, left_latest, left_errors = self._sync_observation_batch(
-                stations_by_source=stations_by_source,
-                source_id_batch=source_id_batch[:midpoint],
-            )
-            right_written, right_latest, right_errors = self._sync_observation_batch(
-                stations_by_source=stations_by_source,
-                source_id_batch=source_id_batch[midpoint:],
-            )
-            return (
-                left_written + right_written,
-                left_latest + right_latest,
-                left_errors + right_errors,
-            )
+            left_rows, left_errors = self._fetch_observation_rows(source_id_batch[:midpoint])
+            right_rows, right_errors = self._fetch_observation_rows(source_id_batch[midpoint:])
+            return left_rows + right_rows, left_errors + right_errors
 
     def _upsert_stations(self, sources: Iterable[FrostSource]) -> dict[str, Station]:
         now = datetime.now(timezone.utc)

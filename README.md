@@ -41,6 +41,7 @@ SNOWER_USERNAME=your-snower-username
 SNOWER_PASSWORD=your-snower-password
 SNOWER_DOMAIN_ID=your-snower-domain-id
 FROST_SOURCE_BATCH_SIZE=25
+FROST_FETCH_CONCURRENCY=1
 FROST_RETENTION_DAYS=14
 ```
 
@@ -138,6 +139,7 @@ SNOWER_DOMAIN_ID=your-snower-domain-id
 FROST_TIMEOUT_SECONDS=60
 FROST_PAGE_LIMIT=1000
 FROST_SOURCE_BATCH_SIZE=25
+FROST_FETCH_CONCURRENCY=1
 FROST_RETENTION_DAYS=14
 ```
 
@@ -176,5 +178,6 @@ mysql+pymysql://yourusername:your-mysql-password@your-mysql-host/yourusername$we
 - MySQL connections use `pool_recycle=280` and `pool_pre_ping=True`, matching PythonAnywhere's SQLAlchemy guidance.
 - `app.py` expects `FROST_CLIENT_ID` in environment variables or `.env`; the key is no longer hardcoded in source.
 - `FROST_RETENTION_DAYS=14` prunes old rows from `observations` while keeping `station_latest` available for map display.
+- `FROST_FETCH_CONCURRENCY` controls how many Frost latest batches are fetched in parallel. Start with `1`, and try `2` or `3` carefully if Frost is stable.
 - Re-running `python -m frost_sync init-db` is safe and will add newer `station_latest` columns like `precipitation_24h` when needed.
 - For stations held by SVV/Statens vegvesen, hourly precipitation above 5 mm is marked with `is_precipitation_suspect` and excluded from the latest precipitation value used in map display.

@@ -23,6 +23,7 @@ class Settings:
     request_timeout_seconds: int = 60
     page_limit: int = 1000
     source_batch_size: int = 25
+    fetch_concurrency: int = 1
     retention_days: int = 14
     acceptable_quality_codes: str = "0,1,2,3,4"
 
@@ -39,6 +40,7 @@ def load_settings() -> Settings:
     timeout = int(os.getenv("FROST_TIMEOUT_SECONDS", "60"))
     page_limit = int(os.getenv("FROST_PAGE_LIMIT", "1000"))
     source_batch_size = int(os.getenv("FROST_SOURCE_BATCH_SIZE", "25"))
+    fetch_concurrency = int(os.getenv("FROST_FETCH_CONCURRENCY", "1"))
     retention_days = int(os.getenv("FROST_RETENTION_DAYS", "14"))
     acceptable_quality_codes = os.getenv("FROST_QUALITY_CODES", "0,1,2,3,4").strip() or "0,1,2,3,4"
 
@@ -54,6 +56,7 @@ def load_settings() -> Settings:
         request_timeout_seconds=timeout,
         page_limit=page_limit,
         source_batch_size=source_batch_size,
+        fetch_concurrency=max(1, fetch_concurrency),
         retention_days=retention_days,
         acceptable_quality_codes=acceptable_quality_codes,
     )
