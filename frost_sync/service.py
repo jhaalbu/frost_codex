@@ -537,9 +537,10 @@ class SyncService:
 
             if capability.available != available:
                 capability.available = available
+                capability.last_seen_at = now
                 updated += 1
-
-            capability.last_seen_at = now
+            elif available:
+                capability.last_seen_at = now
 
         return updated
 
