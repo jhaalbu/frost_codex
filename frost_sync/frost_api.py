@@ -157,7 +157,7 @@ class FrostClient:
             {
                 "sources": ",".join(source_ids),
                 "referencetime": referencetime,
-                "elements": "mean(surface_snow_thickness PT1H)",
+                "elements": "surface_snow_thickness",
                 "timeresolutions": "PT1H",
                 "timeoffsets": "PT0H",
                 "levels": "default",
@@ -173,7 +173,7 @@ class FrostClient:
             {
                 "sources": ",".join(series_ids),
                 "referencetime": _recent_range(lookback_days),
-                "elements": "mean(surface_snow_thickness PT1H)",
+                "elements": "surface_snow_thickness",
                 "timeresolutions": "PT1H",
                 "timeoffsets": "PT0H",
                 "qualities": self.acceptable_quality_codes,

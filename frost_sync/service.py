@@ -475,6 +475,7 @@ class SyncService:
         written = 0
         latest_updates = 0
         capability_cache: dict[int, dict[str, StationCapability]] = {}
+        stations_to_refresh: dict[int, tuple[StationLatest, Station]] = {}
 
         sorted_rows = sorted(
             observation_rows,
@@ -573,12 +574,20 @@ class SyncService:
                     if element_id in PRECIPITATION_ELEMENT_IDS:
                         latest.is_precipitation_suspect = False
                     has_latest_change = True
+                elif element_id in SNOW_DEPTH_ELEMENT_IDS:
+                    # Snow can arrive slightly earlier than wind/temperature, so we still
+                    # need to recompute latest snow metrics even when it does not move the
+                    # station-wide latest timestamp.
+                    has_latest_change = True
 
             if has_latest_change:
-                self._refresh_latest_window_metrics(latest, station)
-                latest.updated_at = now
-                station.last_observation_time = latest.observed_at
-                latest_updates += 1
+                stations_to_refresh[station.id] = (latest, station)
+
+        for latest, station in stations_to_refresh.values():
+            self._refresh_latest_window_metrics(latest, station)
+            latest.updated_at = now
+            station.last_observation_time = latest.observed_at
+            latest_updates += 1
 
         return written, latest_updates
 
@@ -704,6 +713,9 @@ class SyncService:
         latest.air_temperature_max_unit = _first_unit(temperature_rows)
         latest.air_temperature_max_time = _instant_time(air_temperature_max_row)
 
+        latest_snow_row = snow_depth_rows[-1] if snow_depth_rows else None
+        latest.snow_depth = latest_snow_row.value if latest_snow_row else None
+        latest.snow_depth_unit = latest_snow_row.unit if latest_snow_row else None
         latest.snow_depth_change = _snow_depth_change(snow_change_rows)
         latest.snow_depth_change_unit = _first_unit(snow_change_rows) if latest.snow_depth_change is not None else None
 

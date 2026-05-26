@@ -403,7 +403,7 @@ def _load_capabilities(session) -> dict[int, dict[str, bool]]:
         flags = capabilities.setdefault(row.station_id, _empty_capability_flags())
         flag_name = CAPABILITY_FLAG_MAP.get(row.element_id)
         if flag_name:
-            flags[flag_name] = row.available
+            flags[flag_name] = flags.get(flag_name, False) or bool(row.available)
     return capabilities
 
 
@@ -412,7 +412,7 @@ def _capability_flags_from_capabilities(capabilities: dict[str, bool]) -> dict[s
     for element_id, available in capabilities.items():
         flag_name = CAPABILITY_FLAG_MAP.get(element_id)
         if flag_name:
-            flags[flag_name] = bool(available)
+            flags[flag_name] = flags.get(flag_name, False) or bool(available)
     return flags
 
 def _empty_capability_flags() -> dict[str, bool]:
