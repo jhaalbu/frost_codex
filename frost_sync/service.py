@@ -622,7 +622,9 @@ class SyncService:
             if station is None:
                 continue
 
-            reference_time = _ensure_utc(_parse_reference_time(row.get("referenceTime")))
+            reference_time = _normalize_reference_time_for_storage(
+                _ensure_utc(_parse_reference_time(row.get("referenceTime")))
+            )
             if reference_time is None:
                 continue
 
@@ -932,6 +934,12 @@ def _ensure_utc(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _normalize_reference_time_for_storage(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value.replace(microsecond=0)
 
 
 def _format_level(level: dict | None) -> str | None:
