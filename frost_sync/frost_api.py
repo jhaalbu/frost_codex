@@ -11,8 +11,7 @@ from requests import HTTPError
 TARGET_ELEMENTS = [
     "air_temperature",
     "sum(precipitation_amount PT1H)",
-    "surface_snow_thickness",
-    "snow_depth",
+    "mean(surface_snow_thickness PT1H)",
     "wind_from_direction",
     "wind_speed",
 ]
@@ -20,6 +19,7 @@ TARGET_ELEMENTS = [
 LATEST_SYNC_ELEMENTS = [
     "air_temperature",
     "sum(precipitation_amount PT1H)",
+    "mean(surface_snow_thickness PT1H)",
     "wind_from_direction",
     "wind_speed",
 ]
@@ -158,9 +158,9 @@ class FrostClient:
             {
                 "sources": ",".join(source_ids),
                 "referencetime": referencetime,
-                "elements": "surface_snow_thickness",
-                "timeresolutions": "P1D",
-                "timeoffsets": "PT6H",
+                "elements": "mean(surface_snow_thickness PT1H)",
+                "timeresolutions": "default",
+                "timeoffsets": "default",
                 "levels": "default",
             },
         )
@@ -174,9 +174,9 @@ class FrostClient:
             {
                 "sources": ",".join(series_ids),
                 "referencetime": _recent_range(lookback_days),
-                "elements": "surface_snow_thickness",
-                "timeresolutions": "P1D",
-                "timeoffsets": "PT6H",
+                "elements": "mean(surface_snow_thickness PT1H)",
+                "timeresolutions": "default",
+                "timeoffsets": "default",
                 "qualities": self.acceptable_quality_codes,
             },
         )
