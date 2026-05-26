@@ -511,12 +511,13 @@ class SyncService:
         available_elements: set[str],
     ) -> int:
         now = datetime.now(timezone.utc)
-        existing = {
-            capability.element_id: capability
-            for capability in self.session.execute(
-                select(StationCapability).where(StationCapability.station_id == station.id)
-            ).scalars()
-        }
+        with self.session.no_autoflush:
+            existing = {
+                capability.element_id: capability
+                for capability in self.session.execute(
+                    select(StationCapability).where(StationCapability.station_id == station.id)
+                ).scalars()
+            }
 
         updated = 0
         for element_id in tracked_elements:
@@ -741,12 +742,13 @@ class SyncService:
     ) -> None:
         capabilities = capability_cache.get(station.id)
         if capabilities is None:
-            capabilities = {
-                capability.element_id: capability
-                for capability in self.session.execute(
-                    select(StationCapability).where(StationCapability.station_id == station.id)
-                ).scalars()
-            }
+            with self.session.no_autoflush:
+                capabilities = {
+                    capability.element_id: capability
+                    for capability in self.session.execute(
+                        select(StationCapability).where(StationCapability.station_id == station.id)
+                    ).scalars()
+                }
             capability_cache[station.id] = capabilities
 
         capability = capabilities.get(element_id)
