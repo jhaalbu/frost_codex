@@ -219,6 +219,10 @@ class SyncService:
                     ).scalars()
                 }
                 nve_rows = self.nve_hydapi_client.fetch_latest_observations(nve_series_specs)
+                capabilities_updated += self._upsert_capabilities_from_rows(
+                    stations_by_source=nve_stations_by_source,
+                    observation_rows=nve_rows,
+                )
                 nve_written, nve_latest = self._store_observations_batch(nve_stations_by_source, nve_rows)
                 observations_written += nve_written
                 latest_updated += nve_latest
@@ -236,6 +240,10 @@ class SyncService:
                     ).scalars()
                 }
                 snower_rows = self.snower_client.fetch_latest_observations(snower_monitors)
+                capabilities_updated += self._upsert_capabilities_from_rows(
+                    stations_by_source=snower_stations_by_source,
+                    observation_rows=snower_rows,
+                )
                 snower_written, snower_latest = self._store_observations_batch(snower_stations_by_source, snower_rows)
                 observations_written += snower_written
                 latest_updated += snower_latest
@@ -532,6 +540,50 @@ class SyncService:
 
             capability.last_seen_at = now
 
+        return updated
+
+    def _upsert_capabilities_from_rows(
+        self,
+        stations_by_source: dict[str, Station],
+        observation_rows: list[dict],
+    ) -> int:
+        available_by_station: dict[int, set[str]] = {}
+        for row in observation_rows:
+            source_id = _normalize_source_id(row.get("sourceId"))
+            station = stations_by_source.get(source_id)
+            if station is None:
+                continue
+
+            available = available_by_station.setdefault(station.id, set())
+            for item in row.get("observations", []):
+                element_id = item.get("elementId")
+                if not element_id:
+                    continue
+                quality_code = _extract_quality_code(item.get("qualityCode"))
+                if quality_code is not None and quality_code >= 5:
+                    continue
+                normalized_value = _normalize_observation_value(
+                    station=station,
+                    element_id=element_id,
+                    value=item.get("value"),
+                )
+                if normalized_value is None:
+                    continue
+                available.add(element_id)
+
+        if not available_by_station:
+            return 0
+
+        updated = 0
+        for station in stations_by_source.values():
+            available_elements = available_by_station.get(station.id)
+            if not available_elements:
+                continue
+            updated += self._upsert_capabilities_for_elements(
+                station=station,
+                tracked_elements=set(available_elements),
+                available_elements=set(available_elements),
+            )
         return updated
 
     def _preferred_nve_series_specs(self, stations: Iterable[NveHydApiStation]) -> list[NveHydApiSeriesSpec]:
