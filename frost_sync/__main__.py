@@ -56,6 +56,7 @@ def main() -> None:
                 base_url=settings.snower_base_url,
                 username=settings.snower_username,
                 password=settings.snower_password,
+                domain=settings.snower_domain,
                 domain_id=settings.snower_domain_id,
                 timeout_seconds=settings.request_timeout_seconds,
             )

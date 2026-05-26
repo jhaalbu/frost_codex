@@ -93,6 +93,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
         base_url=settings.snower_base_url,
         username=settings.snower_username,
         password=settings.snower_password,
+        domain=settings.snower_domain,
         domain_id=settings.snower_domain_id,
         timeout_seconds=settings.request_timeout_seconds,
     ) if settings.snower_username and settings.snower_password and settings.snower_domain_id else None
@@ -552,7 +553,7 @@ def _build_series_points(
     provider: str,
 ) -> list[dict[str, Any]]:
     preferred_points = _build_direct_points(parameter_id, definition["element_ids"], rows, from_dt, to_dt)
-    if provider != "frost" or preferred_points or not definition.get("fallback_element_ids"):
+    if preferred_points or not definition.get("fallback_element_ids"):
         return preferred_points
 
     fallback_points = _build_direct_points(
@@ -562,6 +563,8 @@ def _build_series_points(
         from_dt,
         to_dt,
     )
+    if provider != "frost":
+        return fallback_points
     return _aggregate_hourly_points(
         fallback_points,
         mode=definition.get("fallback_aggregation", "mean"),

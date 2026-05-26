@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 from requests import HTTPError
@@ -33,13 +34,15 @@ class SnowerClient:
         base_url: str,
         username: str,
         password: str,
+        domain: str | None,
         domain_id: str,
         timeout_seconds: int = 60,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.username = username
         self.password = password
-        self.domain_id = domain_id
+        self.domain = (domain or domain_id.capitalize()).strip()
+        self.domain_id = domain_id.strip().lower()
         self.timeout_seconds = timeout_seconds
         self._authentication_key: str | None = None
         self.session = requests.Session()
@@ -52,15 +55,20 @@ class SnowerClient:
         )
 
     def fetch_stations(self) -> list[SnowerMonitor]:
-        regions = self._post("/regions_list", {"domain": self.domain_id})
+        regions = self._post("/regions_list", {"domain": self.domain})
         monitors: list[SnowerMonitor] = []
         for region in regions:
             areas = self._post("/areas_list", {"region": region})
             for area in areas:
                 area_monitors = self._post("/monitors_list", {"area": area})
                 for monitor_name in area_monitors:
-                    location = self._post("/monitor_location", {"area": area, "monitor": monitor_name}).get("location", {})
+                    monitor_body = {"area": area, "monitor": monitor_name}
+                    status = self._post("/monitor_active_status", monitor_body)
+                    if not bool(status.get("active_status")):
+                        continue
+                    location = self._post("/monitor_location", monitor_body).get("location", {})
                     context = {
+                        "domain": self.domain,
                         "domain_id": self.domain_id,
                         "area": area,
                         "monitor": monitor_name,
@@ -78,17 +86,24 @@ class SnowerClient:
 
     def fetch_latest_observations(self, monitors: list[SnowerMonitor]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
+        now = datetime.now(ZoneInfo("Europe/Oslo"))
+        start = now - timedelta(days=1)
         for monitor in monitors:
             context = parse_provider_context(monitor.provider_context)
             payload = self._post(
-                "/last_reading",
+                "/readings_list",
                 {
                     "area": context["area"],
                     "monitor": context["monitor"],
-                    "readings_types": sorted(SNOWER_TO_LOGICAL_ELEMENT.keys()),
+                    "start_date": _snower_datetime(start),
+                    "end_date": _snower_datetime(now),
                 },
             )
-            rows.extend(self._normalize_last_reading_payload(monitor.source_id, payload))
+            latest_rows = self._latest_rows_from_readings_payload(
+                source_id=monitor.source_id,
+                payload=payload,
+            )
+            rows.extend(latest_rows)
         return rows
 
     def fetch_observations_range(
@@ -114,13 +129,21 @@ class SnowerClient:
                 "monitor": context["monitor"],
                 "start_date": _snower_datetime(from_dt),
                 "end_date": _snower_datetime(to_dt),
-                "readings_types": requested_types,
             },
         )
-        return self._normalize_readings_payload(
+        rows = self._normalize_readings_payload(
             source_id=_monitor_source_id(context["area"], context["monitor"]),
             payload=payload,
         )
+        if requested_types:
+            allowed = set(logical_parameter_ids)
+            for row in rows:
+                row["observations"] = [
+                    item for item in row.get("observations", [])
+                    if item.get("elementId") in allowed
+                ]
+            rows = [row for row in rows if row.get("observations")]
+        return rows
 
     def _normalize_last_reading_payload(self, source_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
         grouped_rows: dict[str, dict[str, Any]] = {}
@@ -177,6 +200,40 @@ class SnowerClient:
                 )
         return rows
 
+    def _latest_rows_from_readings_payload(self, source_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        rows = self._normalize_readings_payload(source_id=source_id, payload=payload)
+        latest_by_parameter: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            reference_time = row.get("referenceTime")
+            if not reference_time:
+                continue
+            reference_dt = _parse_datetime(reference_time)
+            for item in row.get("observations", []):
+                element_id = item.get("elementId")
+                if not element_id:
+                    continue
+                existing = latest_by_parameter.get(element_id)
+                if existing is None or reference_dt > existing["reference_dt"]:
+                    latest_by_parameter[element_id] = {
+                        "reference_dt": reference_dt,
+                        "reference_time": reference_time,
+                        "item": item,
+                    }
+
+        grouped: dict[str, dict[str, Any]] = {}
+        for entry in latest_by_parameter.values():
+            reference_time = entry["reference_time"]
+            row = grouped.setdefault(
+                reference_time,
+                {
+                    "sourceId": source_id,
+                    "referenceTime": reference_time,
+                    "observations": [],
+                },
+            )
+            row["observations"].append(entry["item"])
+        return list(grouped.values())
+
     def _authenticate(self) -> None:
         if self._authentication_key:
             return
@@ -205,6 +262,7 @@ class SnowerClient:
             headers={
                 "authentication-key": self._authentication_key or "",
                 "domain-id": self.domain_id,
+                "Content-Type": "application/json",
             },
             timeout=self.timeout_seconds,
         )
@@ -251,7 +309,7 @@ def _parse_datetime(value: str) -> datetime:
 
 
 def _snower_datetime(value: datetime) -> str:
-    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f+00:00")
+    return value.astimezone(ZoneInfo("Europe/Oslo")).strftime("%Y-%m-%d %H:%M:%S.%f%z")
 
 
 def _normalize_unit(value: Any) -> str | None:
@@ -260,7 +318,7 @@ def _normalize_unit(value: Any) -> str | None:
     text = str(value).strip()
     if not text:
         return None
-    if text.casefold() == "celcius":
+    if text.casefold() in {"celcius", "celsius"}:
         return "degC"
     return text
 
