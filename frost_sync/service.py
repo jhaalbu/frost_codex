@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -90,7 +89,6 @@ class SyncService:
         self,
         page_limit: int,
         source_batch_size: int = 100,
-        fetch_concurrency: int = 1,
         retention_days: int = 14,
     ) -> SyncSummary:
         sources = self.frost_client.fetch_sources(page_limit=page_limit)
@@ -154,17 +152,6 @@ class SyncService:
                     available_elements=available_elements,
                 )
 
-        if snower_monitors:
-            snower_station_rows = self.session.execute(
-                select(Station).where(Station.provider == "snower")
-            ).scalars().all()
-            for station in snower_station_rows:
-                capabilities_updated += self._upsert_capabilities_for_elements(
-                    station=station,
-                    tracked_elements=SNOWER_TARGET_ELEMENTS,
-                    available_elements=set(),
-                )
-
         self.session.commit()
 
         observable_source_ids = [
@@ -183,7 +170,6 @@ class SyncService:
             stations_by_source=stations_by_source,
             source_ids=observable_source_ids,
             source_batch_size=source_batch_size,
-            fetch_concurrency=fetch_concurrency,
         )
         observations_written += batch_written
         latest_updated += batch_latest
@@ -327,69 +313,20 @@ class SyncService:
         stations_by_source: dict[str, Station],
         source_ids: list[str],
         source_batch_size: int,
-        fetch_concurrency: int,
     ) -> tuple[int, int, int]:
         written = 0
         latest = 0
         errors = 0
         source_batches = list(_chunked(source_ids, source_batch_size))
 
-        if fetch_concurrency <= 1 or len(source_batches) <= 1:
-            for source_id_batch in source_batches:
-                batch_written, batch_latest, batch_errors = self._sync_observation_batch(
-                    stations_by_source=stations_by_source,
-                    source_id_batch=source_id_batch,
-                )
-                written += batch_written
-                latest += batch_latest
-                errors += batch_errors
-            return written, latest, errors
-
-        logger.info(
-            "Fetching Frost latest observations with concurrency=%s across %s batches",
-            fetch_concurrency,
-            len(source_batches),
-        )
-        with ThreadPoolExecutor(max_workers=fetch_concurrency) as executor:
-            futures = {
-                executor.submit(self._fetch_observation_rows, source_id_batch): source_id_batch
-                for source_id_batch in source_batches
-            }
-            for future in as_completed(futures):
-                source_id_batch = futures[future]
-                try:
-                    observation_rows, batch_errors = future.result()
-                except Exception as exc:
-                    logger.exception(
-                        "Unexpected failure while fetching batch of %s sources. First source=%s. Error=%s",
-                        len(source_id_batch),
-                        source_id_batch[0] if source_id_batch else None,
-                        exc,
-                    )
-                    errors += len(source_id_batch)
-                    continue
-
-                errors += batch_errors
-                if not observation_rows:
-                    continue
-
-                try:
-                    batch_written, batch_latest = self._store_observations_batch(
-                        stations_by_source,
-                        observation_rows,
-                    )
-                    self.session.commit()
-                    written += batch_written
-                    latest += batch_latest
-                except Exception as exc:
-                    self.session.rollback()
-                    logger.exception(
-                        "Failed to store fetched Frost batch of %s sources. First source=%s. Error=%s",
-                        len(source_id_batch),
-                        source_id_batch[0] if source_id_batch else None,
-                        exc,
-                    )
-                    errors += len(source_id_batch)
+        for source_id_batch in source_batches:
+            batch_written, batch_latest, batch_errors = self._sync_observation_batch(
+                stations_by_source=stations_by_source,
+                source_id_batch=source_id_batch,
+            )
+            written += batch_written
+            latest += batch_latest
+            errors += batch_errors
 
         return written, latest, errors
 
