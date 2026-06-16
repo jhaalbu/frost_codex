@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from time import perf_counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
@@ -90,79 +91,43 @@ class SyncService:
         page_limit: int,
         source_batch_size: int = 100,
         retention_days: int = 14,
+        snow_lookback_hours: int = 48,
     ) -> SyncSummary:
-        sources = self.frost_client.fetch_sources(page_limit=page_limit)
-        stations_by_source = self._upsert_stations(sources)
-        nve_station_count = 0
-        snower_station_count = 0
-        nve_series_specs: list[NveHydApiSeriesSpec] = []
-        nve_station_ids_by_element: dict[str, set[str]] = {}
-        if self.nve_hydapi_client is not None:
-            nve_stations = self.nve_hydapi_client.fetch_stations()
-            self._upsert_nve_stations(nve_stations)
-            nve_station_count = len(nve_stations)
-            nve_series_specs = self._preferred_nve_series_specs(nve_stations)
-            if not nve_series_specs:
-                nve_series_specs = self.nve_hydapi_client.fetch_series_specs()
-            nve_station_ids_by_element = self._nve_station_ids_by_element(nve_series_specs)
-        snower_monitors: list[SnowerMonitor] = []
-        if self.snower_client is not None:
-            try:
-                snower_monitors = self.snower_client.fetch_stations()
-                self._upsert_snower_stations(snower_monitors)
-                snower_station_count = len(snower_monitors)
-            except Exception as exc:
-                logger.warning("Failed to discover Snower monitors: %s", exc)
-        capability_source_ids = {
-            element_id: self.frost_client.fetch_capability_source_ids(element_id)
-            for element_id in TARGET_ELEMENTS
-        }
-
+        sync_started = perf_counter()
+        stage_started = sync_started
         capabilities_updated = 0
         observations_written = 0
         latest_updated = 0
         station_errors = 0
 
-        for source in sources:
-            station = stations_by_source[source.source_id]
-            available_elements = {
-                element_id
-                for element_id, source_ids in capability_source_ids.items()
-                if source.source_id in source_ids and element_id not in SNOW_DEPTH_ELEMENT_IDS
-            }
-            capabilities_updated += self._upsert_capabilities_for_elements(
-                station=station,
-                tracked_elements=set(TARGET_ELEMENTS),
-                available_elements=available_elements,
-            )
+        stations_by_source = self._load_stations_by_provider("frost")
+        if not stations_by_source:
+            logger.info("No Frost station metadata found; running metadata sync first.")
+            metadata_summary = self.sync_metadata(page_limit=page_limit)
+            capabilities_updated += metadata_summary.capabilities_updated
+            stations_by_source = self._load_stations_by_provider("frost")
 
-        if nve_station_ids_by_element:
-            nve_station_rows = self.session.execute(
-                select(Station).where(Station.provider == "nve_hydapi")
-            ).scalars().all()
-            for station in nve_station_rows:
-                available_elements = {
-                    element_id
-                    for element_id, source_ids in nve_station_ids_by_element.items()
-                    if station.source_id in source_ids
-                }
-                capabilities_updated += self._upsert_capabilities_for_elements(
-                    station=station,
-                    tracked_elements=NVE_TARGET_ELEMENTS,
-                    available_elements=available_elements,
-                )
-
-        self.session.commit()
+        capability_source_ids = self._load_capability_source_ids("frost", set(TARGET_ELEMENTS))
+        frost_station_count = len(stations_by_source)
 
         observable_source_ids = [
-            source.source_id
-            for source in sources
+            source_id
+            for source_id in stations_by_source
             if any(
-                source.source_id in source_ids
+                source_id in source_ids
                 for element_id, source_ids in capability_source_ids.items()
                 if element_id not in SNOW_DEPTH_ELEMENT_IDS
             )
         ]
+        snow_source_ids = sorted(
+            {
+                *capability_source_ids.get(SURFACE_SNOW_THICKNESS_ELEMENT, set()),
+                *capability_source_ids.get(SNOW_DEPTH_ELEMENT, set()),
+            }
+        )
+        if not snow_source_ids:
+            logger.info("No Frost snow capabilities found; checking all Frost stations once.")
+            snow_source_ids = sorted(stations_by_source)
 
         snow_capable_source_ids: set[str] = set()
 
@@ -174,27 +139,39 @@ class SyncService:
         observations_written += batch_written
         latest_updated += batch_latest
         station_errors += batch_errors
+        stage_started = _log_sync_stage("Frost latest", stage_started)
 
         snow_written, snow_latest, snow_errors = self._sync_snow_observations(
             stations_by_source=stations_by_source,
-            source_ids=observable_source_ids,
+            source_ids=snow_source_ids,
             source_batch_size=source_batch_size,
-            lookback_days=retention_days,
+            lookback_hours=snow_lookback_hours,
             snow_capable_source_ids=snow_capable_source_ids,
         )
         observations_written += snow_written
         latest_updated += snow_latest
         station_errors += snow_errors
+        stage_started = _log_sync_stage("Frost snow", stage_started)
 
-        for source in sources:
-            if source.source_id not in snow_capable_source_ids:
+        for source_id in snow_capable_source_ids:
+            station = stations_by_source.get(source_id)
+            if station is None:
                 continue
-            station = stations_by_source[source.source_id]
             capabilities_updated += self._upsert_capabilities_for_elements(
                 station=station,
                 tracked_elements=SNOW_DEPTH_ELEMENT_IDS,
                 available_elements={SURFACE_SNOW_THICKNESS_ELEMENT},
             )
+
+        nve_station_count = 0
+        nve_series_specs: list[NveHydApiSeriesSpec] = []
+        if self.nve_hydapi_client is not None:
+            nve_stations = self.nve_hydapi_client.fetch_stations()
+            self._upsert_nve_stations(nve_stations)
+            nve_station_count = len(nve_stations)
+            nve_series_specs = self._preferred_nve_series_specs(nve_stations)
+            if not nve_series_specs:
+                nve_series_specs = self.nve_hydapi_client.fetch_series_specs()
 
         if nve_series_specs:
             try:
@@ -216,9 +193,13 @@ class SyncService:
                 self.session.rollback()
                 logger.exception("Failed to sync NVE HydAPI observations: %s", exc)
                 station_errors += len(nve_series_specs)
+        stage_started = _log_sync_stage("NVE HydAPI", stage_started)
 
+        snower_station_count = 0
+        snower_monitors = self._load_snower_monitors_from_db()
         if snower_monitors:
             try:
+                snower_station_count = len(snower_monitors)
                 snower_stations_by_source = {
                     station.source_id: station
                     for station in self.session.execute(
@@ -237,25 +218,133 @@ class SyncService:
                 self.session.rollback()
                 logger.exception("Failed to sync Snower observations: %s", exc)
                 station_errors += len(snower_monitors)
+        stage_started = _log_sync_stage("Snower", stage_started)
 
-        observations_deleted = self._prune_old_observations(retention_days)
         self.session.commit()
+        _log_sync_stage("Database commit", stage_started)
+        logger.info("Hourly sync completed in %.1fs", perf_counter() - sync_started)
 
         return SyncSummary(
-            stations_seen=len(sources) + nve_station_count + snower_station_count,
+            stations_seen=frost_station_count + nve_station_count + snower_station_count,
             capabilities_updated=capabilities_updated,
             observations_written=observations_written,
             latest_updated=latest_updated,
-            observations_deleted=observations_deleted,
+            observations_deleted=0,
             station_errors=station_errors,
         )
+
+    def sync_metadata(
+        self,
+        page_limit: int,
+        source_batch_size: int = 100,
+        snow_lookback_hours: int = 48,
+    ) -> SyncSummary:
+        sources = self.frost_client.fetch_sources(page_limit=page_limit)
+        stations_by_source = self._upsert_stations(sources)
+        capabilities_updated = 0
+        station_errors = 0
+
+        capability_source_ids = {
+            element_id: self.frost_client.fetch_capability_source_ids(element_id)
+            for element_id in TARGET_ELEMENTS
+        }
+        for source in sources:
+            station = stations_by_source[source.source_id]
+            available_elements = {
+                element_id
+                for element_id, source_ids in capability_source_ids.items()
+                if source.source_id in source_ids and element_id not in SNOW_DEPTH_ELEMENT_IDS
+            }
+            capabilities_updated += self._upsert_capabilities_for_elements(
+                station=station,
+                tracked_elements=set(TARGET_ELEMENTS),
+                available_elements=available_elements,
+            )
+
+        snow_capable_source_ids: set[str] = set()
+        source_ids = [source.source_id for source in sources]
+        for source_batch in _chunked(source_ids, source_batch_size):
+            try:
+                snow_series_ids = self.frost_client.fetch_snow_series_ids(
+                    source_batch,
+                    lookback_hours=snow_lookback_hours,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to refresh Frost snow metadata for batch of %s sources. First source=%s. Error=%s",
+                    len(source_batch),
+                    source_batch[0] if source_batch else None,
+                    exc,
+                )
+                station_errors += len(source_batch)
+                continue
+            snow_capable_source_ids.update(_normalize_source_id(series_id) for series_id in snow_series_ids)
+
+        for source_id in snow_capable_source_ids:
+            station = stations_by_source.get(source_id)
+            if station is None:
+                continue
+            capabilities_updated += self._upsert_capabilities_for_elements(
+                station=station,
+                tracked_elements=SNOW_DEPTH_ELEMENT_IDS,
+                available_elements={SURFACE_SNOW_THICKNESS_ELEMENT},
+            )
+
+        nve_station_count = 0
+        if self.nve_hydapi_client is not None:
+            nve_stations = self.nve_hydapi_client.fetch_stations()
+            self._upsert_nve_stations(nve_stations)
+            nve_station_count = len(nve_stations)
+            nve_station_ids_by_element = self._nve_station_ids_by_element(
+                self._preferred_nve_series_specs(nve_stations)
+            )
+            if nve_station_ids_by_element:
+                nve_station_rows = self.session.execute(
+                    select(Station).where(Station.provider == "nve_hydapi")
+                ).scalars().all()
+                for station in nve_station_rows:
+                    available_elements = {
+                        element_id
+                        for element_id, source_ids in nve_station_ids_by_element.items()
+                        if station.source_id in source_ids
+                    }
+                    capabilities_updated += self._upsert_capabilities_for_elements(
+                        station=station,
+                        tracked_elements=NVE_TARGET_ELEMENTS,
+                        available_elements=available_elements,
+                    )
+
+        snower_station_count = 0
+        if self.snower_client is not None:
+            try:
+                snower_monitors = self.snower_client.fetch_stations()
+                self._upsert_snower_stations(snower_monitors)
+                snower_station_count = len(snower_monitors)
+            except Exception as exc:
+                logger.warning("Failed to discover Snower monitors: %s", exc)
+                station_errors += 1
+
+        self.session.commit()
+        return SyncSummary(
+            stations_seen=len(sources) + nve_station_count + snower_station_count,
+            capabilities_updated=capabilities_updated,
+            observations_written=0,
+            latest_updated=0,
+            observations_deleted=0,
+            station_errors=station_errors,
+        )
+
+    def prune_observations(self, retention_days: int) -> int:
+        deleted = self._prune_old_observations(retention_days)
+        self.session.commit()
+        return deleted
 
     def _sync_snow_observations(
         self,
         stations_by_source: dict[str, Station],
         source_ids: list[str],
         source_batch_size: int,
-        lookback_days: int,
+        lookback_hours: int,
         snow_capable_source_ids: set[str],
     ) -> tuple[int, int, int]:
         written = 0
@@ -264,11 +353,11 @@ class SyncService:
 
         for source_batch in _chunked(source_ids, source_batch_size):
             try:
-                snow_series_ids = self.frost_client.fetch_snow_series_ids(source_batch, lookback_days=lookback_days)
+                snow_series_ids = self.frost_client.fetch_snow_series_ids(source_batch, lookback_hours=lookback_hours)
                 if not snow_series_ids:
                     continue
                 snow_capable_source_ids.update(_normalize_source_id(series_id) for series_id in snow_series_ids)
-                snow_rows = self.frost_client.fetch_recent_snow_observations(snow_series_ids, lookback_days=lookback_days)
+                snow_rows = self.frost_client.fetch_recent_snow_observations(snow_series_ids, lookback_hours=lookback_hours)
                 batch_written, batch_latest = self._store_observations_batch(stations_by_source, snow_rows)
                 self.session.commit()
                 written += batch_written
@@ -440,6 +529,51 @@ class SyncService:
             station.longitude = source.longitude
             station.latitude = source.latitude
             station.last_seen_at = now
+
+    def _load_stations_by_provider(self, provider: str) -> dict[str, Station]:
+        return {
+            station.source_id: station
+            for station in self.session.execute(
+                select(Station).where(Station.provider == provider)
+            ).scalars()
+        }
+
+    def _load_capability_source_ids(self, provider: str, element_ids: set[str]) -> dict[str, set[str]]:
+        rows = (
+            self.session.execute(
+                select(Station.source_id, StationCapability.element_id)
+                .join(StationCapability, StationCapability.station_id == Station.id)
+                .where(
+                    Station.provider == provider,
+                    StationCapability.available.is_(True),
+                    StationCapability.element_id.in_(element_ids),
+                )
+            )
+            .all()
+        )
+        source_ids: dict[str, set[str]] = {element_id: set() for element_id in element_ids}
+        for source_id, element_id in rows:
+            source_ids.setdefault(element_id, set()).add(source_id)
+        return source_ids
+
+    def _load_snower_monitors_from_db(self) -> list[SnowerMonitor]:
+        monitors: list[SnowerMonitor] = []
+        stations = self.session.execute(
+            select(Station).where(Station.provider == "snower")
+        ).scalars()
+        for station in stations:
+            if not station.provider_context:
+                continue
+            monitors.append(
+                SnowerMonitor(
+                    source_id=station.source_id,
+                    name=station.name or station.source_id,
+                    longitude=station.longitude,
+                    latitude=station.latitude,
+                    provider_context=station.provider_context,
+                )
+            )
+        return monitors
 
     def _upsert_capabilities_for_elements(
         self,
@@ -854,6 +988,12 @@ def _apply_latest_observation(latest: StationLatest, reference_time: datetime, i
 def _chunked(items: list[str], chunk_size: int) -> Iterable[list[str]]:
     for index in range(0, len(items), chunk_size):
         yield items[index:index + chunk_size]
+
+
+def _log_sync_stage(label: str, stage_started: float) -> float:
+    now = perf_counter()
+    logger.info("%s completed in %.1fs", label, now - stage_started)
+    return now
 
 
 def _normalize_source_id(value: str | None) -> str:

@@ -42,6 +42,7 @@ SNOWER_PASSWORD=your-snower-password
 SNOWER_DOMAIN_ID=your-snower-domain-id
 FROST_SOURCE_BATCH_SIZE=25
 FROST_RETENTION_DAYS=14
+FROST_SNOW_LOOKBACK_HOURS=48
 ```
 
 5. Create the database schema:
@@ -50,13 +51,19 @@ FROST_RETENTION_DAYS=14
 python -m frost_sync init-db
 ```
 
-6. Run one sync:
+6. Refresh station metadata:
+
+```bash
+python -m frost_sync sync-metadata
+```
+
+7. Run one observation sync:
 
 ```bash
 python -m frost_sync run-hourly
 ```
 
-7. Run the local API:
+8. Run the local API:
 
 ```bash
 flask --app app run --host 127.0.0.1 --port 5000
@@ -139,6 +146,7 @@ FROST_TIMEOUT_SECONDS=60
 FROST_PAGE_LIMIT=1000
 FROST_SOURCE_BATCH_SIZE=25
 FROST_RETENTION_DAYS=14
+FROST_SNOW_LOOKBACK_HOURS=48
 ```
 
 4. Initialize the database:
@@ -149,13 +157,25 @@ workon frostenv
 python -m frost_sync init-db
 ```
 
-5. Create an hourly scheduled task:
+5. Create an hourly scheduled task for fresh observations:
 
 ```bash
 cd /home/yourusername/frost_codex && /home/yourusername/.virtualenvs/frostenv/bin/python -m frost_sync run-hourly
 ```
 
-6. Create a Flask web app in the PythonAnywhere dashboard and point its WSGI file at [pythonanywhere_wsgi.py](C:\Users\Aalbu\OneDrive\Dokumenter\Koding\frost_codex\pythonanywhere_wsgi.py). Replace `yourusername` in that file with your actual PythonAnywhere username.
+6. Create a daily scheduled task for station/capability metadata:
+
+```bash
+cd /home/yourusername/frost_codex && /home/yourusername/.virtualenvs/frostenv/bin/python -m frost_sync sync-metadata
+```
+
+7. Create a daily scheduled task for pruning old observations:
+
+```bash
+cd /home/yourusername/frost_codex && /home/yourusername/.virtualenvs/frostenv/bin/python -m frost_sync prune-db
+```
+
+8. Create a Flask web app in the PythonAnywhere dashboard and point its WSGI file at [pythonanywhere_wsgi.py](C:\Users\Aalbu\OneDrive\Dokumenter\Koding\frost_codex\pythonanywhere_wsgi.py). Replace `yourusername` in that file with your actual PythonAnywhere username.
 
 Use a MySQL connection string such as:
 
@@ -175,6 +195,9 @@ mysql+pymysql://yourusername:your-mysql-password@your-mysql-host/yourusername$we
 - For SQLite testing, use a fresh database file when the schema changes significantly.
 - MySQL connections use `pool_recycle=280` and `pool_pre_ping=True`, matching PythonAnywhere's SQLAlchemy guidance.
 - `app.py` expects `FROST_CLIENT_ID` in environment variables or `.env`; the key is no longer hardcoded in source.
-- `FROST_RETENTION_DAYS=14` prunes old rows from `observations` while keeping `station_latest` available for map display.
+- `FROST_RETENTION_DAYS=14` controls how much observation history `prune-db` keeps while leaving `station_latest` available for map display.
+- `FROST_SNOW_LOOKBACK_HOURS=48` controls how far back the hourly sync fetches Frost snow observations.
+- `sync-metadata` refreshes station metadata and capabilities; run it daily or manually after adding new providers/config.
+- `run-hourly` reads existing metadata from the database and focuses on fresh observations.
 - Re-running `python -m frost_sync init-db` is safe and will add newer `station_latest` columns like `precipitation_24h` when needed.
 - For stations held by SVV/Statens vegvesen, hourly precipitation above 5 mm is marked with `is_precipitation_suspect` and excluded from the latest precipitation value used in map display.

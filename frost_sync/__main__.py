@@ -21,7 +21,9 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("init-db", help="Create database schema")
+    subparsers.add_parser("sync-metadata", help="Refresh station and capability metadata")
     subparsers.add_parser("run-hourly", help="Run one hourly sync")
+    subparsers.add_parser("prune-db", help="Delete old observation rows")
     serve_parser = subparsers.add_parser("serve", help="Run Flask API for ArcGIS/web clients")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=5000)
@@ -34,7 +36,7 @@ def main() -> None:
         print("Database schema created.")
         return
 
-    if args.command == "run-hourly":
+    if args.command in {"run-hourly", "sync-metadata", "prune-db"}:
         settings = load_settings()
         session_factory = create_session_factory(settings.database_url)
         frost_client = FrostClient(
@@ -68,11 +70,23 @@ def main() -> None:
                 nve_hydapi_client=nve_hydapi_client,
                 snower_client=snower_client,
             )
-            summary = service.run_hourly_sync(
-                page_limit=settings.page_limit,
-                source_batch_size=settings.source_batch_size,
-                retention_days=settings.retention_days,
-            )
+            if args.command == "sync-metadata":
+                summary = service.sync_metadata(
+                    page_limit=settings.page_limit,
+                    source_batch_size=settings.source_batch_size,
+                    snow_lookback_hours=settings.snow_lookback_hours,
+                )
+            elif args.command == "prune-db":
+                observations_deleted = service.prune_observations(settings.retention_days)
+                print(f"Prune finished. observations_deleted={observations_deleted}")
+                return
+            else:
+                summary = service.run_hourly_sync(
+                    page_limit=settings.page_limit,
+                    source_batch_size=settings.source_batch_size,
+                    retention_days=settings.retention_days,
+                    snow_lookback_hours=settings.snow_lookback_hours,
+                )
 
         print(
             "Sync finished. "

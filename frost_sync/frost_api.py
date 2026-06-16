@@ -150,8 +150,8 @@ class FrostClient:
             },
         )
 
-    def fetch_snow_series_ids(self, source_ids: list[str], lookback_days: int) -> list[str]:
-        referencetime = _recent_range(lookback_days)
+    def fetch_snow_series_ids(self, source_ids: list[str], lookback_hours: int) -> list[str]:
+        referencetime = _recent_range_hours(lookback_hours)
         data = self._get(
             "/observations/availableTimeSeries/v0.jsonld",
             {
@@ -165,14 +165,14 @@ class FrostClient:
         )
         return sorted({item["sourceId"] for item in data if item.get("sourceId")})
 
-    def fetch_recent_snow_observations(self, series_ids: list[str], lookback_days: int) -> list[dict[str, Any]]:
+    def fetch_recent_snow_observations(self, series_ids: list[str], lookback_hours: int) -> list[dict[str, Any]]:
         if not series_ids:
             return []
         return self._get(
             "/observations/v0.jsonld",
             {
                 "sources": ",".join(series_ids),
-                "referencetime": _recent_range(lookback_days),
+                "referencetime": _recent_range_hours(lookback_hours),
                 "elements": "surface_snow_thickness",
                 "timeresolutions": "PT1H",
                 "timeoffsets": "PT0H",
@@ -230,6 +230,12 @@ def _format_stationholders(value: Any) -> str | None:
 def _recent_range(days: int) -> str:
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
+    return f"{_isoformat_utc(start)}/{_isoformat_utc(end)}"
+
+
+def _recent_range_hours(hours: int) -> str:
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(hours=hours)
     return f"{_isoformat_utc(start)}/{_isoformat_utc(end)}"
 
 

@@ -25,6 +25,7 @@ class Settings:
     page_limit: int = 1000
     source_batch_size: int = 25
     retention_days: int = 14
+    snow_lookback_hours: int = 48
     acceptable_quality_codes: str = "0,1,2,3,4"
 
 
@@ -42,6 +43,7 @@ def load_settings() -> Settings:
     page_limit = int(os.getenv("FROST_PAGE_LIMIT", "1000"))
     source_batch_size = int(os.getenv("FROST_SOURCE_BATCH_SIZE", "25"))
     retention_days = int(os.getenv("FROST_RETENTION_DAYS", "14"))
+    snow_lookback_hours = int(os.getenv("FROST_SNOW_LOOKBACK_HOURS", "48"))
     acceptable_quality_codes = os.getenv("FROST_QUALITY_CODES", "0,1,2,3,4").strip() or "0,1,2,3,4"
 
     return Settings(
@@ -58,6 +60,7 @@ def load_settings() -> Settings:
         page_limit=page_limit,
         source_batch_size=source_batch_size,
         retention_days=retention_days,
+        snow_lookback_hours=max(1, snow_lookback_hours),
         acceptable_quality_codes=acceptable_quality_codes,
     )
 
