@@ -147,6 +147,38 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
 
         return jsonify({"type": "FeatureCollection", "features": features})
 
+    @blueprint.get("/api/stations/latest.compact.geojson")
+    def latest_compact_geojson() -> Any:
+        with session_factory() as session:
+            rows = (
+                session.execute(
+                    select(Station, StationLatest)
+                    .join(StationLatest, StationLatest.station_id == Station.id)
+                    .order_by(Station.source_id)
+                )
+                .all()
+            )
+
+        features = []
+        for station, latest in rows:
+            if station.longitude is None or station.latitude is None:
+                continue
+            if _is_suspect_nve_feature(station, latest):
+                continue
+
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [station.longitude, station.latitude],
+                    },
+                    "properties": _compact_latest_properties(station, latest),
+                }
+            )
+
+        return jsonify({"type": "FeatureCollection", "features": features})
+
     @blueprint.get("/api/stations/history.geojson")
     def history_geojson() -> Any:
         from_dt, to_dt = _resolve_time_range()
@@ -294,6 +326,43 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
             ]
         )
 
+    @blueprint.get("/api/timeseries")
+    def stations_timeseries() -> Any:
+        source_ids = _resolve_source_ids(
+            request.args.get("stations") or request.args.get("source_ids")
+        )
+        parameter_ids = _resolve_parameter_ids(request.args.get("parameters"))
+        from_dt, to_dt = _resolve_time_range()
+
+        with session_factory() as session:
+            stations = (
+                session.execute(select(Station).where(Station.source_id.in_(source_ids)))
+                .scalars()
+                .all()
+            )
+            stations_by_source = {station.source_id: station for station in stations}
+
+        station_payloads, errors = _build_timeseries_payloads_for_stations(
+            stations=[station for source_id in source_ids if (station := stations_by_source.get(source_id)) is not None],
+            parameter_ids=parameter_ids,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            frost_client=frost_client,
+            nve_hydapi_client=nve_hydapi_client,
+            snower_client=snower_client,
+        )
+
+        return jsonify(
+            {
+                "from": _isoformat(from_dt),
+                "to": _isoformat(to_dt),
+                "parameters": parameter_ids,
+                "stations": station_payloads,
+                "missing": [source_id for source_id in source_ids if source_id not in stations_by_source],
+                "errors": errors,
+            }
+        )
+
     @blueprint.get("/api/stations/<source_id>/timeseries")
     def station_timeseries(source_id: str) -> Any:
         parameter_ids = _resolve_parameter_ids(request.args.get("parameters"))
@@ -306,67 +375,26 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
             )
             if station is None:
                 abort(404)
-            station_provider = station.provider
 
-        if station_provider == "frost":
-            if frost_client is None:
-                abort(503, description="Frost client is not configured")
-            try:
-                normalized_rows = _fetch_frost_timeseries_rows(
-                    frost_client=frost_client,
-                    source_id=source_id,
-                    parameter_ids=parameter_ids,
-                    from_dt=from_dt,
-                    to_dt=to_dt,
-                )
-            except RuntimeError as exc:
-                abort(502, description=str(exc))
-        elif station_provider == "nve_hydapi":
-            if nve_hydapi_client is None:
-                abort(503, description="NVE HydAPI client is not configured")
-            try:
-                normalized_rows = _fetch_nve_timeseries_rows(
-                    hydapi_client=nve_hydapi_client,
-                    source_id=source_id,
-                    parameter_ids=parameter_ids,
-                    from_dt=from_dt,
-                    to_dt=to_dt,
-                )
-            except RuntimeError as exc:
-                abort(502, description=str(exc))
-        elif station_provider == "snower":
-            if snower_client is None:
-                abort(503, description="Snower client is not configured")
-            try:
-                normalized_rows = _fetch_snower_timeseries_rows(
-                    snower_client=snower_client,
-                    station=station,
-                    parameter_ids=parameter_ids,
-                    from_dt=from_dt,
-                    to_dt=to_dt,
-                )
-            except RuntimeError as exc:
-                abort(502, description=str(exc))
-        else:
-            abort(400, description=f"Unsupported provider: {station_provider}")
-
-        series = {
-            parameter_id: _build_direct_series_payload(
-                parameter_id=parameter_id,
-                rows=normalized_rows,
+        try:
+            payload = _build_timeseries_payload_for_station(
+                station=station,
+                parameter_ids=parameter_ids,
                 from_dt=from_dt,
                 to_dt=to_dt,
-                provider=station_provider,
+                frost_client=frost_client,
+                nve_hydapi_client=nve_hydapi_client,
+                snower_client=snower_client,
             )
-            for parameter_id in parameter_ids
-        }
+        except RuntimeError as exc:
+            abort(502, description=str(exc))
 
         return jsonify(
             {
-                "station": _timeseries_station_properties(station),
+                "station": payload["station"],
                 "from": _isoformat(from_dt),
                 "to": _isoformat(to_dt),
-                "series": series,
+                "series": payload["series"],
             }
         )
 
@@ -448,6 +476,213 @@ def _resolve_parameter_ids(raw_value: str | None) -> list[str]:
     return parameter_ids
 
 
+def _resolve_source_ids(raw_value: str | None) -> list[str]:
+    if not raw_value:
+        abort(400, description="Use ?stations=SOURCE1,SOURCE2")
+    source_ids = []
+    seen = set()
+    for item in raw_value.split(","):
+        source_id = item.strip()
+        if not source_id or source_id in seen:
+            continue
+        source_ids.append(source_id)
+        seen.add(source_id)
+    if not source_ids:
+        abort(400, description="Use ?stations=SOURCE1,SOURCE2")
+    return source_ids
+
+
+def _build_timeseries_payload_for_station(
+    station: Station,
+    parameter_ids: list[str],
+    from_dt: datetime,
+    to_dt: datetime,
+    frost_client: FrostClient | None,
+    nve_hydapi_client: NveHydApiClient | None,
+    snower_client: SnowerClient | None,
+) -> dict[str, Any]:
+    normalized_rows = _fetch_timeseries_rows_for_station(
+        station=station,
+        parameter_ids=parameter_ids,
+        from_dt=from_dt,
+        to_dt=to_dt,
+        frost_client=frost_client,
+        nve_hydapi_client=nve_hydapi_client,
+        snower_client=snower_client,
+    )
+    return {
+        "station": _timeseries_station_properties(station),
+        "series": {
+            parameter_id: _build_direct_series_payload(
+                parameter_id=parameter_id,
+                rows=normalized_rows,
+                from_dt=from_dt,
+                to_dt=to_dt,
+                provider=station.provider,
+            )
+            for parameter_id in parameter_ids
+        },
+    }
+
+
+def _build_timeseries_payloads_for_stations(
+    stations: list[Station],
+    parameter_ids: list[str],
+    from_dt: datetime,
+    to_dt: datetime,
+    frost_client: FrostClient | None,
+    nve_hydapi_client: NveHydApiClient | None,
+    snower_client: SnowerClient | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    rows_by_source: dict[str, list[dict[str, Any]]] = {station.source_id: [] for station in stations}
+    errors: list[dict[str, str]] = []
+
+    frost_stations = [station for station in stations if station.provider == "frost"]
+    if frost_stations:
+        if frost_client is None:
+            errors.extend(
+                {"source_id": station.source_id, "message": "Frost client is not configured"}
+                for station in frost_stations
+            )
+        else:
+            try:
+                frost_rows = _fetch_frost_timeseries_rows_for_sources(
+                    frost_client=frost_client,
+                    source_ids=[station.source_id for station in frost_stations],
+                    parameter_ids=parameter_ids,
+                    from_dt=from_dt,
+                    to_dt=to_dt,
+                )
+                _extend_rows_by_source(rows_by_source, frost_rows)
+            except RuntimeError as exc:
+                errors.extend({"source_id": station.source_id, "message": str(exc)} for station in frost_stations)
+
+    nve_stations = [station for station in stations if station.provider == "nve_hydapi"]
+    if nve_stations:
+        if nve_hydapi_client is None:
+            errors.extend(
+                {"source_id": station.source_id, "message": "NVE HydAPI client is not configured"}
+                for station in nve_stations
+            )
+        else:
+            try:
+                nve_rows = _fetch_nve_timeseries_rows_for_sources(
+                    hydapi_client=nve_hydapi_client,
+                    source_ids=[station.source_id for station in nve_stations],
+                    parameter_ids=parameter_ids,
+                    from_dt=from_dt,
+                    to_dt=to_dt,
+                )
+                _extend_rows_by_source(rows_by_source, nve_rows)
+            except RuntimeError as exc:
+                errors.extend({"source_id": station.source_id, "message": str(exc)} for station in nve_stations)
+
+    for station in stations:
+        if station.provider == "snower":
+            if snower_client is None:
+                errors.append({"source_id": station.source_id, "message": "Snower client is not configured"})
+                continue
+            try:
+                rows_by_source[station.source_id] = _fetch_snower_timeseries_rows(
+                    snower_client=snower_client,
+                    station=station,
+                    parameter_ids=parameter_ids,
+                    from_dt=from_dt,
+                    to_dt=to_dt,
+                )
+            except RuntimeError as exc:
+                errors.append({"source_id": station.source_id, "message": str(exc)})
+        elif station.provider not in {"frost", "nve_hydapi"}:
+            errors.append({"source_id": station.source_id, "message": f"Unsupported provider: {station.provider}"})
+
+    payloads = [
+        _build_timeseries_payload_from_rows(
+            station=station,
+            parameter_ids=parameter_ids,
+            rows=rows_by_source.get(station.source_id, []),
+            from_dt=from_dt,
+            to_dt=to_dt,
+        )
+        for station in stations
+        if not any(error["source_id"] == station.source_id for error in errors)
+    ]
+    return payloads, errors
+
+
+def _build_timeseries_payload_from_rows(
+    station: Station,
+    parameter_ids: list[str],
+    rows: list[dict[str, Any]],
+    from_dt: datetime,
+    to_dt: datetime,
+) -> dict[str, Any]:
+    return {
+        "station": _timeseries_station_properties(station),
+        "series": {
+            parameter_id: _build_direct_series_payload(
+                parameter_id=parameter_id,
+                rows=rows,
+                from_dt=from_dt,
+                to_dt=to_dt,
+                provider=station.provider,
+            )
+            for parameter_id in parameter_ids
+        },
+    }
+
+
+def _extend_rows_by_source(
+    rows_by_source: dict[str, list[dict[str, Any]]],
+    rows: list[dict[str, Any]],
+) -> None:
+    for row in rows:
+        source_id = _normalize_source_id(row.get("sourceId"))
+        if source_id in rows_by_source:
+            rows_by_source[source_id].append(row)
+
+
+def _fetch_timeseries_rows_for_station(
+    station: Station,
+    parameter_ids: list[str],
+    from_dt: datetime,
+    to_dt: datetime,
+    frost_client: FrostClient | None,
+    nve_hydapi_client: NveHydApiClient | None,
+    snower_client: SnowerClient | None,
+) -> list[dict[str, Any]]:
+    if station.provider == "frost":
+        if frost_client is None:
+            raise RuntimeError("Frost client is not configured")
+        return _fetch_frost_timeseries_rows(
+            frost_client=frost_client,
+            source_id=station.source_id,
+            parameter_ids=parameter_ids,
+            from_dt=from_dt,
+            to_dt=to_dt,
+        )
+    if station.provider == "nve_hydapi":
+        if nve_hydapi_client is None:
+            raise RuntimeError("NVE HydAPI client is not configured")
+        return _fetch_nve_timeseries_rows(
+            hydapi_client=nve_hydapi_client,
+            source_id=station.source_id,
+            parameter_ids=parameter_ids,
+            from_dt=from_dt,
+            to_dt=to_dt,
+        )
+    if station.provider == "snower":
+        if snower_client is None:
+            raise RuntimeError("Snower client is not configured")
+        return _fetch_snower_timeseries_rows(
+            snower_client=snower_client,
+            station=station,
+            parameter_ids=parameter_ids,
+            from_dt=from_dt,
+            to_dt=to_dt,
+        )
+    raise RuntimeError(f"Unsupported provider: {station.provider}")
+
+
 def _fetch_frost_timeseries_rows(
     frost_client: FrostClient,
     source_id: str,
@@ -466,6 +701,24 @@ def _fetch_frost_timeseries_rows(
     )
 
 
+def _fetch_frost_timeseries_rows_for_sources(
+    frost_client: FrostClient,
+    source_ids: list[str],
+    parameter_ids: list[str],
+    from_dt: datetime,
+    to_dt: datetime,
+) -> list[dict[str, Any]]:
+    element_ids = _direct_observation_element_ids(parameter_ids)
+    if not element_ids or not source_ids:
+        return []
+    return frost_client.fetch_observations_range(
+        source_ids=source_ids,
+        elements=sorted(element_ids),
+        from_dt=_lookback_start(from_dt, parameter_ids),
+        to_dt=to_dt,
+    )
+
+
 def _fetch_nve_timeseries_rows(
     hydapi_client: NveHydApiClient,
     source_id: str,
@@ -474,6 +727,27 @@ def _fetch_nve_timeseries_rows(
     to_dt: datetime,
 ) -> list[dict[str, Any]]:
     series_specs = hydapi_client.fetch_series_specs_for_station(source_id)
+    if not series_specs:
+        return []
+    needed = set(parameter_ids)
+    if "precipitation_24h_rolling" in needed:
+        needed.add("precipitation_1h")
+    filtered_specs = [spec for spec in series_specs if spec.logical_element_id in needed]
+    return hydapi_client.fetch_observations_range(
+        filtered_specs,
+        from_dt=_lookback_start(from_dt, parameter_ids),
+        to_dt=to_dt,
+    )
+
+
+def _fetch_nve_timeseries_rows_for_sources(
+    hydapi_client: NveHydApiClient,
+    source_ids: list[str],
+    parameter_ids: list[str],
+    from_dt: datetime,
+    to_dt: datetime,
+) -> list[dict[str, Any]]:
+    series_specs = hydapi_client.fetch_series_specs_for_stations(source_ids)
     if not series_specs:
         return []
     needed = set(parameter_ids)
@@ -503,6 +777,12 @@ def _fetch_snower_timeseries_rows(
         to_dt=to_dt,
         logical_parameter_ids=supported,
     )
+
+
+def _normalize_source_id(value: str | None) -> str:
+    if not value:
+        return ""
+    return value.split(":", 1)[0]
 
 
 def _direct_observation_element_ids(parameter_ids: list[str]) -> set[str]:
@@ -1113,6 +1393,36 @@ def _timeseries_station_properties(station: Station) -> dict[str, Any]:
         "name": station.name,
         "masl": station.masl,
     }
+
+
+def _compact_latest_properties(station: Station, latest: StationLatest) -> dict[str, Any]:
+    recent_status = _recent_status(station.last_observation_time)
+    properties = {
+        "source_id": station.source_id,
+        "provider": station.provider,
+        "name": station.name,
+        "stationholder": station.stationholder,
+        "masl": station.masl,
+        "observed_at": _isoformat(latest.observed_at),
+        "has_recent_data": recent_status["has_recent_data"],
+        "minutes_since_observation": recent_status["minutes_since_observation"],
+        "air_temperature": latest.air_temperature,
+        "precipitation_1h": latest.precipitation_1h,
+        "is_precipitation_suspect": latest.is_precipitation_suspect or None,
+        "precipitation_3h": latest.precipitation_3h,
+        "precipitation_24h": latest.precipitation_24h,
+        "snow_depth": latest.snow_depth,
+        "snow_depth_change": latest.snow_depth_change,
+        "wind_from_direction": latest.wind_from_direction,
+        "wind_speed": latest.wind_speed,
+        "discharge": latest.discharge,
+        "groundwater_level": latest.groundwater_level,
+    }
+    return _without_null_values(properties)
+
+
+def _without_null_values(properties: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in properties.items() if value is not None}
 
 
 def _latest_properties(latest: StationLatest) -> dict[str, Any]:

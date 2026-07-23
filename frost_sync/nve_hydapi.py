@@ -171,6 +171,13 @@ class NveHydApiClient:
         payload = self._get("/Series", params={"StationId": source_id})
         return _select_series_specs(payload.get("data", []))
 
+    def fetch_series_specs_for_stations(self, source_ids: list[str]) -> list[NveHydApiSeriesSpec]:
+        specs: list[NveHydApiSeriesSpec] = []
+        for batch in _chunked(source_ids, 50):
+            payload = self._get("/Series", params={"StationId": ",".join(batch)})
+            specs.extend(_select_series_specs(payload.get("data", [])))
+        return specs
+
     def fetch_observations_range(
         self,
         series_specs: list[NveHydApiSeriesSpec],

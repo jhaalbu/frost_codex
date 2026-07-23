@@ -73,6 +73,7 @@ flask --app app run --host 127.0.0.1 --port 5000
 
 - `GET /health`
 - `GET /api/stations/latest.geojson`
+- `GET /api/stations/latest.compact.geojson`
 - `GET /api/stations/latest.geojson?has=air_temperature`
 - `GET /api/stations/history.geojson?date=2026-04-03`
 - `GET /api/stations/history.geojson?from=2026-04-03T00:00:00Z&to=2026-04-03T23:59:59Z`
@@ -80,13 +81,16 @@ flask --app app run --host 127.0.0.1 --port 5000
 - `GET /api/stations/SN18700/observations?date=2026-04-03`
 - `GET /api/parameters`
 - `GET /api/stations/SN18700/timeseries?parameters=air_temperature,precipitation_1h,precipitation_24h_rolling&from=2026-05-04T00:00:00Z&to=2026-05-05T23:59:59Z`
+- `GET /api/timeseries?stations=SN18700,SN10055&parameters=air_temperature,precipitation_1h&from=2026-05-04T00:00:00Z&to=2026-05-05T23:59:59Z`
 
 The `latest.geojson` endpoint is the best starting point for ArcGIS map display because it returns one feature per station with the latest values already flattened into fields.
 It includes both `precipitation_1h` and rolling `precipitation_24h`, and can also include `discharge` and `groundwater_level` for NVE HydAPI stations, plus `snow_depth` and mapped temperature values from Snower monitors.
 To make ArcGIS symbolization easier, the endpoint also includes `available_parameter_count` and `parameter_profile`.
+Use `latest.compact.geojson` when you want to add GeoJSON directly to an ArcGIS web map with a smaller payload. It omits capability flags, coordinate properties, unit fields and all `null` properties.
 
 The `timeseries` endpoint is meant for plotting in applications like VertiGIS/Highcharts.
 It fetches data directly from Frost, NVE HydAPI or Snower instead of reading the local history table, so you can request longer periods without having to keep all plotting data in the local database.
+Use `/api/timeseries` when you want the same simple series payload for several stations in one response. The API looks up each station's provider from the database, batches Frost and NVE HydAPI requests by provider, and returns empty `data` arrays for parameters that are not available on a station.
 The only derived plotting series currently exposed is `precipitation_24h_rolling`, which is calculated from hourly precipitation values returned by the provider.
 For Frost plotting, the endpoint now prefers hourly series such as `mean(air_temperature PT1H)`, `mean(wind_speed PT1H)`, `mean(wind_from_direction PT1H)` and `max(wind_speed_of_gust PT1H)`.
 If a station does not expose those hourly Frost elements, the API falls back to raw observations and aggregates them to hourly values before returning the series.
