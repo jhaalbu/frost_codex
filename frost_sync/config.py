@@ -27,6 +27,7 @@ class Settings:
     retention_days: int = 14
     snow_lookback_hours: int = 48
     acceptable_quality_codes: str = "0,1,2,3,4"
+    geojson_cache_dir: str = "geojson_cache"
 
 
 def load_settings() -> Settings:
@@ -45,6 +46,7 @@ def load_settings() -> Settings:
     retention_days = int(os.getenv("FROST_RETENTION_DAYS", "14"))
     snow_lookback_hours = int(os.getenv("FROST_SNOW_LOOKBACK_HOURS", "48"))
     acceptable_quality_codes = os.getenv("FROST_QUALITY_CODES", "0,1,2,3,4").strip() or "0,1,2,3,4"
+    geojson_cache_dir = os.getenv("FROST_GEOJSON_CACHE_DIR", "geojson_cache").strip() or "geojson_cache"
 
     return Settings(
         frost_client_id=client_id,
@@ -62,6 +64,7 @@ def load_settings() -> Settings:
         retention_days=retention_days,
         snow_lookback_hours=max(1, snow_lookback_hours),
         acceptable_quality_codes=acceptable_quality_codes,
+        geojson_cache_dir=geojson_cache_dir,
     )
 
 

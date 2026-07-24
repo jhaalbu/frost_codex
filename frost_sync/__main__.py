@@ -24,6 +24,7 @@ def main() -> None:
     subparsers.add_parser("sync-metadata", help="Refresh station and capability metadata")
     subparsers.add_parser("run-hourly", help="Run one hourly sync")
     subparsers.add_parser("prune-db", help="Delete old observation rows")
+    subparsers.add_parser("refresh-geojson-cache", help="Prebuild compact GeoJSON endpoint files")
     serve_parser = subparsers.add_parser("serve", help="Run Flask API for ArcGIS/web clients")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=5000)
@@ -34,6 +35,14 @@ def main() -> None:
         settings = load_settings()
         create_schema(settings.database_url)
         print("Database schema created.")
+        return
+
+    if args.command == "refresh-geojson-cache":
+        settings = load_settings()
+        from frost_sync.web import refresh_geojson_cache
+
+        written = refresh_geojson_cache(settings)
+        print("GeoJSON cache refreshed. " + " ".join(f"{name}={path}" for name, path in written.items()))
         return
 
     if args.command in {"run-hourly", "sync-metadata", "prune-db"}:
@@ -87,6 +96,15 @@ def main() -> None:
                     retention_days=settings.retention_days,
                     snow_lookback_hours=settings.snow_lookback_hours,
                 )
+
+        if args.command == "run-hourly":
+            from frost_sync.web import refresh_geojson_cache
+
+            written = refresh_geojson_cache(settings)
+            logging.info(
+                "GeoJSON cache refreshed. %s",
+                " ".join(f"{name}={path}" for name, path in written.items()),
+            )
 
         print(
             "Sync finished. "
