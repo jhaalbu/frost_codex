@@ -69,6 +69,22 @@ CAPABILITY_FLAG_MAP = {
     "groundwater_level": "has_groundwater_level",
 }
 
+SEVEN_DAY_AGGREGATE_ELEMENT_MAP = {
+    "air_temperature": ["air_temperature", "mean(air_temperature PT1H)"],
+    "precipitation_1h": ["sum(precipitation_amount PT1H)", "precipitation_1h"],
+    "snow_depth": ["snow_depth", "surface_snow_thickness"],
+    "wind_speed": ["wind_speed", "mean(wind_speed PT1H)"],
+    "wind_gust": ["max(wind_speed_of_gust PT10M)", "max(wind_speed_of_gust PT1H)"],
+    "discharge": ["discharge"],
+    "groundwater_level": ["groundwater_level"],
+}
+
+SEVEN_DAY_AGGREGATE_ELEMENT_IDS = {
+    element_id
+    for element_ids in SEVEN_DAY_AGGREGATE_ELEMENT_MAP.values()
+    for element_id in element_ids
+}
+
 def create_app() -> Flask:
     app = Flask(__name__)
     app.register_blueprint(create_blueprint())
@@ -174,6 +190,68 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                         "coordinates": [station.longitude, station.latitude],
                     },
                     "properties": _compact_latest_properties(station, latest),
+                }
+            )
+
+        return jsonify({"type": "FeatureCollection", "features": features})
+
+    @blueprint.get("/api/stations/latest.7d.geojson")
+    def latest_7d_geojson() -> Any:
+        window_to = datetime.now(timezone.utc)
+        window_from = window_to - timedelta(days=7)
+
+        with session_factory() as session:
+            rows = (
+                session.execute(
+                    select(Station, StationLatest)
+                    .join(StationLatest, StationLatest.station_id == Station.id)
+                    .order_by(Station.source_id)
+                )
+                .all()
+            )
+            observation_rows = (
+                session.execute(
+                    select(Observation)
+                    .where(
+                        and_(
+                            Observation.reference_time >= window_from,
+                            Observation.reference_time <= window_to,
+                            Observation.element_id.in_(SEVEN_DAY_AGGREGATE_ELEMENT_IDS),
+                        )
+                    )
+                    .order_by(Observation.station_id, Observation.reference_time)
+                )
+                .scalars()
+                .all()
+            )
+
+        stations_by_id = {station.id: station for station, _latest in rows}
+        aggregates_by_station = _seven_day_aggregates_by_station(observation_rows, stations_by_id)
+
+        features = []
+        for station, latest in rows:
+            if station.longitude is None or station.latitude is None:
+                continue
+            if _is_suspect_nve_feature(station, latest):
+                continue
+
+            aggregates = aggregates_by_station.get(station.id)
+            if not aggregates:
+                continue
+
+            properties = {
+                **_compact_latest_base_properties(station, latest),
+                **aggregates,
+            }
+
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [station.longitude, station.latitude],
+                    },
+                    "properties": _without_null_values(properties),
                 }
             )
 
@@ -1395,9 +1473,9 @@ def _timeseries_station_properties(station: Station) -> dict[str, Any]:
     }
 
 
-def _compact_latest_properties(station: Station, latest: StationLatest) -> dict[str, Any]:
+def _compact_latest_base_properties(station: Station, latest: StationLatest) -> dict[str, Any]:
     recent_status = _recent_status(station.last_observation_time)
-    properties = {
+    return {
         "source_id": station.source_id,
         "provider": station.provider,
         "name": station.name,
@@ -1406,6 +1484,12 @@ def _compact_latest_properties(station: Station, latest: StationLatest) -> dict[
         "observed_at": _isoformat(latest.observed_at),
         "has_recent_data": recent_status["has_recent_data"],
         "minutes_since_observation": recent_status["minutes_since_observation"],
+    }
+
+
+def _compact_latest_properties(station: Station, latest: StationLatest) -> dict[str, Any]:
+    properties = {
+        **_compact_latest_base_properties(station, latest),
         "air_temperature": latest.air_temperature,
         "precipitation_1h": latest.precipitation_1h,
         "is_precipitation_suspect": latest.is_precipitation_suspect or None,
@@ -1419,6 +1503,67 @@ def _compact_latest_properties(station: Station, latest: StationLatest) -> dict[
         "groundwater_level": latest.groundwater_level,
     }
     return _without_null_values(properties)
+
+
+def _seven_day_aggregates_by_station(
+    observation_rows: list[Observation],
+    stations_by_id: dict[int, Station],
+) -> dict[int, dict[str, Any]]:
+    element_to_parameter = {
+        element_id: parameter_id
+        for parameter_id, element_ids in SEVEN_DAY_AGGREGATE_ELEMENT_MAP.items()
+        for element_id in element_ids
+    }
+    aggregates: dict[int, dict[str, Any]] = {}
+    max_rows: dict[tuple[int, str], Observation] = {}
+    precipitation_totals: dict[int, float] = {}
+
+    for row in observation_rows:
+        if row.value is None:
+            continue
+
+        parameter_id = element_to_parameter.get(row.element_id)
+        if parameter_id is None:
+            continue
+
+        if parameter_id == "precipitation_1h":
+            if _is_precipitation_observation_suspect(stations_by_id.get(row.station_id), row.value):
+                continue
+            precipitation_totals[row.station_id] = precipitation_totals.get(row.station_id, 0.0) + row.value
+
+        key = (row.station_id, parameter_id)
+        current = max_rows.get(key)
+        if current is None or row.value > (current.value if current.value is not None else float("-inf")):
+            max_rows[key] = row
+
+    for (station_id, parameter_id), row in max_rows.items():
+        station_aggregates = aggregates.setdefault(station_id, {})
+        station_aggregates[f"{parameter_id}_max_7d"] = row.value
+        station_aggregates[f"{parameter_id}_max_7d_time"] = _isoformat(row.reference_time)
+
+    for station_id, value in precipitation_totals.items():
+        aggregates.setdefault(station_id, {})["precipitation_7d_accumulated"] = round(value, 3)
+
+    return aggregates
+
+
+def _is_precipitation_observation_suspect(station: Station | None, value: float | None) -> bool:
+    if value is None or value < 0:
+        return True
+
+    stationholder = (station.stationholder or "").lower() if station else ""
+    is_strict_provider = bool(
+        station
+        and (
+            station.provider == "nve_hydapi"
+            or "vegvesen" in stationholder
+            or stationholder == "svv"
+        )
+    )
+    if is_strict_provider:
+        return value > 5
+
+    return value > 300
 
 
 def _without_null_values(properties: dict[str, Any]) -> dict[str, Any]:

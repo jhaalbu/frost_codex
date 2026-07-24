@@ -74,6 +74,7 @@ flask --app app run --host 127.0.0.1 --port 5000
 - `GET /health`
 - `GET /api/stations/latest.geojson`
 - `GET /api/stations/latest.compact.geojson`
+- `GET /api/stations/latest.7d.geojson`
 - `GET /api/stations/latest.geojson?has=air_temperature`
 - `GET /api/stations/history.geojson?date=2026-04-03`
 - `GET /api/stations/history.geojson?from=2026-04-03T00:00:00Z&to=2026-04-03T23:59:59Z`
@@ -87,6 +88,7 @@ The `latest.geojson` endpoint is the best starting point for ArcGIS map display 
 It includes both `precipitation_1h` and rolling `precipitation_24h`, and can also include `discharge` and `groundwater_level` for NVE HydAPI stations, plus `snow_depth` and mapped temperature values from Snower monitors.
 To make ArcGIS symbolization easier, the endpoint also includes `available_parameter_count` and `parameter_profile`.
 Use `latest.compact.geojson` when you want to add GeoJSON directly to an ArcGIS web map with a smaller payload. It omits capability flags, coordinate properties, unit fields and all `null` properties.
+Use `latest.7d.geojson` for a compact ArcGIS-friendly layer with maximum values from the last 7 days and `precipitation_7d_accumulated`.
 
 The `timeseries` endpoint is meant for plotting in applications like VertiGIS/Highcharts.
 It fetches data directly from Frost, NVE HydAPI or Snower instead of reading the local history table, so you can request longer periods without having to keep all plotting data in the local database.
@@ -99,6 +101,91 @@ The response is intentionally simple:
 - `series` is an object keyed by parameter name
 - each parameter contains `parameter`, `unit` and `data`
 - each `data` point contains `time`, `timestamp`, `value` and `quality_code`
+
+## Data methods and filters
+
+### Providers
+
+- Frost is the main weather provider. Station metadata comes from Frost `sources`, while latest observations and recent snow observations come from Frost `observations`.
+- NVE HydAPI is enabled when `NVE_HYDAPI_KEY` is configured. The app maps selected HydAPI series into the same logical field names as Frost, including `precipitation_1h`, `snow_depth`, `discharge` and `groundwater_level`.
+- Snower is enabled when `SNOWER_USERNAME`, `SNOWER_PASSWORD` and `SNOWER_DOMAIN_ID` are configured. Snower monitors are stored with provider `snower`, stationholder `Snower`, and mapped into logical fields like `air_temperature` and `snow_depth`.
+
+### Quality filtering
+
+- Frost requests use `FROST_QUALITY_CODES`, default `0,1,2,3,4`.
+- Observations with `quality_code >= 5` are skipped during storage when quality is present.
+- `prune-db` also deletes any stored observations with `quality_code >= 5`.
+- NVE and Snower quality values are stored when available, but missing quality is allowed because not all provider payloads use the same quality-code model.
+
+### Latest values
+
+- `station_latest` stores one flattened row per station for map display.
+- The latest timestamp is updated when a newer observation is stored for a mapped element.
+- `has_recent_data` is calculated from `stations.last_observation_time`; the current threshold is 120 minutes.
+- Capability fields such as `has_air_temperature` and `has_snow_depth` come from `station_capabilities`, not from whether the latest value is non-null.
+- `parameter_profile` is derived from capabilities: `complete` means temperature, precipitation, wind and snow; `weather` means temperature, precipitation and wind; `snow` means snow is available; all other combinations are `lesser`.
+
+### Precipitation filters
+
+- Frost and NVE hourly precipitation is normalized to the logical field `precipitation_1h`.
+- For NVE HydAPI stations, `precipitation_1h < 0` and `precipitation_1h > 5 mm` are treated as suspect.
+- For SVV/Statens vegvesen road stations, `precipitation_1h > 5 mm` is treated as suspect because optical sensors can over-report during blowing snow.
+- Suspect precipitation is excluded from the latest precipitation value and from rolling/max precipitation calculations.
+- `is_precipitation_suspect` is set when the latest precipitation observation for a station was removed by this filter.
+- For `latest.7d.geojson`, the same strict 5 mm hourly threshold is used for NVE and Vegvesen/SVV precipitation before calculating max and accumulated precipitation.
+
+### Snow filters
+
+- Frost `surface_snow_thickness`, NVE `snow_depth` and Snower snow depth values are normalized to the logical field `snow_depth`.
+- Snow values of `-1` are normalized to `0`.
+- Snow values `<= -3` are discarded.
+- For NVE snow depth, negative values are normalized to `0`, while values above `1000` are discarded as unrealistic.
+- `snow_depth_change` compares the latest snow depth against the closest observation around 24 hours earlier, using a 7-day lookup window.
+- If latest snow depth is `0` and no recent snow depth in the last 24 hours is above `0`, `snow_depth_change` is omitted.
+
+### 24-hour derived fields
+
+- `precipitation_24h` is the sum of hourly precipitation rows in the last 24 hours before the station's latest observation time.
+- `precipitation_1h_max` is the largest accepted hourly precipitation value in that same 24-hour window.
+- `precipitation_1h_max_period` stores the one-hour period where that max occurred.
+- `precipitation_3h` is a rolling 3-hour sum ending at the station's latest observation time.
+- `precipitation_3h_max` is the largest rolling 3-hour sum in the last 24 hours.
+- `precipitation_3h_max_period` stores the 3-hour period where that max occurred.
+- `air_temperature_min` and `air_temperature_max` are min/max temperature over the latest 24-hour window.
+- `wind_speed_max` is the largest wind speed over the latest 24-hour window, and `wind_from_direction_max` is the wind direction at that same timestamp when available.
+
+### 7-day GeoJSON method
+
+- `latest.7d.geojson` is calculated from stored `observations`, not from `station_latest` columns.
+- The time window is always the last 7 days from request time.
+- It returns one feature per station only when at least one 7-day aggregate exists.
+- Maximum fields are named like `air_temperature_max_7d`, `snow_depth_max_7d`, `wind_speed_max_7d`, `wind_gust_max_7d`, `discharge_max_7d` and `groundwater_level_max_7d`.
+- Each max field also gets a timestamp field named `*_max_7d_time`.
+- `precipitation_7d_accumulated` is the sum of accepted hourly precipitation values in the 7-day window.
+- Because this endpoint reads from `observations`, `FROST_RETENTION_DAYS` must be at least 7 if you want complete 7-day values.
+
+### Compact GeoJSON method
+
+- `latest.compact.geojson` keeps the same station filtering as `latest.geojson`, but removes capability flags, coordinate properties, unit fields and all null values.
+- `latest.7d.geojson` uses the same compact style so it can be added directly to an ArcGIS web map with less payload overhead.
+- Both compact endpoints keep coordinates only in GeoJSON geometry.
+
+### Timeseries method
+
+- `/api/stations/<source_id>/timeseries` and `/api/timeseries` fetch plotting data directly from the provider instead of reading historical observations from the local database.
+- The API resolves provider from `source_id`, so the client does not need to send provider in the request.
+- Frost and NVE requests are batched by provider for `/api/timeseries`.
+- Frost timeseries prefers hourly elements such as `mean(air_temperature PT1H)`, `mean(wind_speed PT1H)`, `mean(wind_from_direction PT1H)` and `max(wind_speed_of_gust PT1H)`.
+- If preferred Frost hourly elements are not available, raw values are fetched and aggregated to hourly points in the API response.
+- `precipitation_24h_rolling` is derived from provider hourly precipitation values.
+- `precipitation_accumulated` accumulates precipitation through the requested time range.
+
+### Retention and scheduled jobs
+
+- `run-hourly` updates observations and `station_latest`, but does not prune old observations.
+- `sync-metadata` refreshes station metadata and capabilities and should run daily or when provider configuration changes.
+- `prune-db` deletes observations older than `FROST_RETENTION_DAYS` and bad-quality rows.
+- The default retention is 14 days, which is enough for 24-hour latest fields and the 7-day GeoJSON endpoint.
 
 ## Reuse inside an existing Flask app
 
