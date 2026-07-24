@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
+import gzip
 import json
 import math
 from pathlib import Path
@@ -170,14 +171,18 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
         cached_response = _cached_geojson_response(settings, "latest.compact.geojson")
         if cached_response is not None:
             return cached_response
-        return jsonify(build_latest_compact_geojson(session_factory))
+        response = jsonify(build_latest_compact_geojson(session_factory))
+        response.headers["X-GeoJSON-Cache"] = "database-fallback"
+        return response
 
     @blueprint.get("/api/stations/latest.7d.geojson")
     def latest_7d_geojson() -> Any:
         cached_response = _cached_geojson_response(settings, "latest.7d.geojson")
         if cached_response is not None:
             return cached_response
-        return jsonify(build_latest_7d_geojson(session_factory))
+        response = jsonify(build_latest_7d_geojson(session_factory))
+        response.headers["X-GeoJSON-Cache"] = "database-fallback"
+        return response
 
     @blueprint.get("/api/stations/history.geojson")
     def history_geojson() -> Any:
@@ -415,11 +420,13 @@ def refresh_geojson_cache(settings: Settings | None = None) -> dict[str, Path]:
     for filename, payload in payloads.items():
         path = cache_dir / filename
         tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            encoding="utf-8",
-        )
+        content = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        tmp_path.write_bytes(content)
         tmp_path.replace(path)
+        gzip_path = path.with_suffix(path.suffix + ".gz")
+        tmp_gzip_path = gzip_path.with_suffix(gzip_path.suffix + ".tmp")
+        tmp_gzip_path.write_bytes(gzip.compress(content, compresslevel=6, mtime=0))
+        tmp_gzip_path.replace(gzip_path)
         written[filename] = path
     return written
 
@@ -522,7 +529,18 @@ def _cached_geojson_response(settings: Settings, filename: str) -> Any | None:
     path = _geojson_cache_dir(settings) / filename
     if not path.exists():
         return None
-    return send_file(path, mimetype="application/geo+json", conditional=True, max_age=60)
+
+    gzip_path = path.with_suffix(path.suffix + ".gz")
+    if gzip_path.exists() and "gzip" in request.headers.get("Accept-Encoding", ""):
+        response = send_file(gzip_path, mimetype="application/geo+json", conditional=True, max_age=300)
+        response.headers["Content-Encoding"] = "gzip"
+        response.headers["Vary"] = "Accept-Encoding"
+        response.headers["X-GeoJSON-Cache"] = "file-gzip"
+        return response
+
+    response = send_file(path, mimetype="application/geo+json", conditional=True, max_age=300)
+    response.headers["X-GeoJSON-Cache"] = "file"
+    return response
 
 
 def _geojson_cache_dir(settings: Settings) -> Path:
