@@ -316,8 +316,17 @@ class SyncService:
                         tracked_elements=NVE_TARGET_ELEMENTS,
                         available_elements=available_elements,
                     )
+                discharge_source_ids = nve_station_ids_by_element.get(DISCHARGE_ELEMENT, set())
+                percentile_source_ids = self.nve_hydapi_client.fetch_discharge_percentile_source_ids()
+                selected_percentile_source_ids = sorted(discharge_source_ids & percentile_source_ids)
+                skipped_percentile_source_count = len(discharge_source_ids - percentile_source_ids)
+                if skipped_percentile_source_count:
+                    logger.info(
+                        "Skipping NVE discharge percentiles for %s stations without HydAPI percentile data.",
+                        skipped_percentile_source_count,
+                    )
                 percentile_rows_updated = self._sync_nve_discharge_percentiles(
-                    source_ids=sorted(nve_station_ids_by_element.get(DISCHARGE_ELEMENT, set())),
+                    source_ids=selected_percentile_source_ids,
                     stations_by_source=nve_stations_by_source,
                 )
                 if percentile_rows_updated:

@@ -189,6 +189,20 @@ class NveHydApiClient:
             specs.extend(_select_series_specs(payload.get("data", [])))
         return specs
 
+    def fetch_discharge_percentile_source_ids(self) -> set[str]:
+        payload = self._get("/Percentiles", params={})
+        source_ids: set[str] = set()
+        for item in payload.get("data", []):
+            if not isinstance(item, dict):
+                continue
+            parameter = _first_int(item, "parameter", "Parameter")
+            if parameter != 1001:
+                continue
+            source_id = _first_non_empty(item, "stationId", "StationId")
+            if source_id:
+                source_ids.add(source_id)
+        return source_ids
+
     def fetch_discharge_percentiles_for_station(self, source_id: str) -> list[NveHydApiDischargePercentile]:
         payload = self._get(
             f"/Percentiles/{source_id}/1001",
