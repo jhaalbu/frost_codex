@@ -598,6 +598,12 @@ class SyncService:
                     select(StationCapability).where(StationCapability.station_id == station.id)
                 ).scalars()
             }
+            for pending in self.session.new:
+                if not isinstance(pending, StationCapability):
+                    continue
+                if pending.station_id != station.id:
+                    continue
+                existing[pending.element_id] = pending
 
         updated = 0
         for element_id in tracked_elements:
