@@ -13,7 +13,7 @@ from sqlalchemy import and_, select
 from frost_sync.config import Settings, load_settings
 from frost_sync.db import create_session_factory
 from frost_sync.frost_api import FrostClient
-from frost_sync.models import Observation, Station, StationCapability, StationLatest
+from frost_sync.models import NveDischargePercentile, Observation, Station, StationCapability, StationLatest
 from frost_sync.nve_hydapi import NveHydApiClient
 from frost_sync.snower_api import SnowerClient
 
@@ -88,6 +88,8 @@ SEVEN_DAY_AGGREGATE_ELEMENT_IDS = {
     for element_id in element_ids
 }
 
+EXCLUDED_PRECIPITATION_SOURCE_IDS = {"2.36.0", "SN11000"}
+
 def create_app() -> Flask:
     app = Flask(__name__)
     app.register_blueprint(create_blueprint())
@@ -132,10 +134,11 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                     select(Station, StationLatest)
                     .join(StationLatest, StationLatest.station_id == Station.id)
                     .order_by(Station.source_id)
-                )
-                .all()
             )
+            .all()
+        )
             capabilities = _load_capabilities(session)
+            discharge_percentiles = _load_discharge_percentiles(session, rows)
 
         features = []
         for station, latest in rows:
@@ -159,7 +162,12 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                         **_station_properties(station),
                         **capability_flags,
                         **_parameter_profile_properties(capability_flags),
-                        **_latest_properties(latest),
+                        **_latest_properties_for_station(station, latest),
+                        **_discharge_classification_properties(
+                            station,
+                            latest,
+                            discharge_percentiles.get(_discharge_percentile_key(station, latest)),
+                        ),
                     },
                 }
             )
@@ -264,7 +272,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
             **_station_properties(station),
             "capabilities": capabilities,
             **_parameter_profile_properties(_capability_flags_from_capabilities(capabilities)),
-            "latest": _latest_properties(latest) if latest else None,
+            "latest": _latest_properties_for_station(station, latest) if latest else None,
         }
         return jsonify(payload)
 
@@ -441,6 +449,7 @@ def build_latest_compact_geojson(session_factory) -> dict[str, Any]:
             )
             .all()
         )
+        discharge_percentiles = _load_discharge_percentiles(session, rows)
 
     features = []
     for station, latest in rows:
@@ -456,7 +465,11 @@ def build_latest_compact_geojson(session_factory) -> dict[str, Any]:
                     "type": "Point",
                     "coordinates": [station.longitude, station.latitude],
                 },
-                "properties": _compact_latest_properties(station, latest),
+                "properties": _compact_latest_properties(
+                    station,
+                    latest,
+                    discharge_percentiles.get(_discharge_percentile_key(station, latest)),
+                ),
             }
         )
 
@@ -491,6 +504,7 @@ def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
             .scalars()
             .all()
         )
+        discharge_percentiles = _load_discharge_percentiles(session, rows)
 
     stations_by_id = {station.id: station for station, _latest in rows}
     aggregates_by_station = _seven_day_aggregates_by_station(observation_rows, stations_by_id)
@@ -509,6 +523,11 @@ def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
         properties = {
             **_compact_latest_base_properties(station, latest),
             **aggregates,
+            **_discharge_classification_properties(
+                station,
+                latest,
+                discharge_percentiles.get(_discharge_percentile_key(station, latest)),
+            ),
         }
 
         features.append(
@@ -1558,22 +1577,143 @@ def _compact_latest_base_properties(station: Station, latest: StationLatest) -> 
     }
 
 
-def _compact_latest_properties(station: Station, latest: StationLatest) -> dict[str, Any]:
+def _compact_latest_properties(
+    station: Station,
+    latest: StationLatest,
+    discharge_percentile: NveDischargePercentile | None = None,
+) -> dict[str, Any]:
     properties = {
         **_compact_latest_base_properties(station, latest),
-        "air_temperature": latest.air_temperature,
-        "precipitation_1h": latest.precipitation_1h,
-        "is_precipitation_suspect": latest.is_precipitation_suspect or None,
-        "precipitation_3h": latest.precipitation_3h,
-        "precipitation_24h": latest.precipitation_24h,
+        "air_temperature": _air_temperature_value_for_station(station, latest.air_temperature),
+        "precipitation_1h": None if _station_precipitation_is_excluded(station) else latest.precipitation_1h,
+        "is_precipitation_suspect": (latest.is_precipitation_suspect or _station_precipitation_is_excluded(station)) or None,
+        "precipitation_3h": None if _station_precipitation_is_excluded(station) else latest.precipitation_3h,
+        "precipitation_24h": None if _station_precipitation_is_excluded(station) else latest.precipitation_24h,
         "snow_depth": latest.snow_depth,
         "snow_depth_change": latest.snow_depth_change,
         "wind_from_direction": latest.wind_from_direction,
         "wind_speed": latest.wind_speed,
         "discharge": latest.discharge,
         "groundwater_level": latest.groundwater_level,
+        **_discharge_classification_properties(station, latest, discharge_percentile),
     }
     return _without_null_values(properties)
+
+
+def _load_discharge_percentiles(
+    session,
+    rows: list[tuple[Station, StationLatest]],
+) -> dict[tuple[int, str], NveDischargePercentile]:
+    keys = {
+        key
+        for station, latest in rows
+        if (key := _discharge_percentile_key(station, latest)) is not None
+    }
+    if not keys:
+        return {}
+
+    station_ids = {station_id for station_id, _date_mmdd in keys}
+    date_mmdds = {date_mmdd for _station_id, date_mmdd in keys}
+    percentile_rows = (
+        session.execute(
+            select(NveDischargePercentile).where(
+                NveDischargePercentile.station_id.in_(station_ids),
+                NveDischargePercentile.date_mmdd.in_(date_mmdds),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {(row.station_id, row.date_mmdd): row for row in percentile_rows}
+
+
+def _discharge_percentile_key(station: Station, latest: StationLatest) -> tuple[int, str] | None:
+    if station.provider != "nve_hydapi" or latest.discharge is None:
+        return None
+    observed_at = _ensure_utc(latest.observed_at) or datetime.now(timezone.utc)
+    return station.id, observed_at.strftime("%m-%d")
+
+
+def _discharge_classification_properties(
+    station: Station,
+    latest: StationLatest,
+    percentile: NveDischargePercentile | None,
+) -> dict[str, Any]:
+    observed_at = _ensure_utc(latest.observed_at)
+    age_hours = None
+    if observed_at is not None:
+        age_hours = round((datetime.now(timezone.utc) - observed_at).total_seconds() / 3600, 2)
+
+    if latest.discharge is None and station.provider != "nve_hydapi":
+        return {}
+
+    base = {
+        "discharge_observed_at": _isoformat(observed_at),
+        "discharge_age_hours": age_hours,
+        "discharge_age_class": _discharge_age_class(age_hours),
+    }
+    if latest.discharge is None:
+        return {
+            **base,
+            "discharge_class": "missing_value",
+            "discharge_class_rank": 0,
+            "discharge_class_source": "none",
+            "discharge_value_missing": True,
+            "discharge_classification_missing": None,
+        }
+
+    if station.provider != "nve_hydapi" or percentile is None:
+        return {
+            **base,
+            "discharge_class": "missing_classification",
+            "discharge_class_rank": 10,
+            "discharge_class_source": "latest_value_only",
+            "discharge_value_missing": None,
+            "discharge_classification_missing": True,
+        }
+
+    discharge_class, rank = _classify_discharge_by_percentile(latest.discharge, percentile)
+    classification_missing = discharge_class == "missing_classification"
+    return {
+        **base,
+        "discharge_class": discharge_class,
+        "discharge_class_rank": rank,
+        "discharge_class_source": "percentile" if not classification_missing else "latest_value_only",
+        "discharge_value_missing": None,
+        "discharge_classification_missing": classification_missing or None,
+        "discharge_percentile_date": percentile.date_mmdd,
+        "discharge_perc25": percentile.perc25,
+        "discharge_perc75": percentile.perc75,
+        "discharge_perc90": percentile.perc90,
+        "discharge_perc95": percentile.perc95,
+    }
+
+
+def _classify_discharge_by_percentile(
+    value: float,
+    percentile: NveDischargePercentile,
+) -> tuple[str, int]:
+    if percentile.perc25 is None or percentile.perc75 is None:
+        return "missing_classification", 10
+    if percentile.perc95 is not None and value >= percentile.perc95:
+        return "high_plus", 60
+    if percentile.perc90 is not None and value >= percentile.perc90:
+        return "high", 50
+    if value >= percentile.perc75:
+        return "high_minus", 40
+    if value < percentile.perc25:
+        return "low", 20
+    return "normal", 30
+
+
+def _discharge_age_class(age_hours: float | None) -> str:
+    if age_hours is None:
+        return "missing"
+    if age_hours <= 4:
+        return "fresh"
+    if age_hours <= 24:
+        return "stale_4_24h"
+    return "stale_over_24h"
 
 
 def _seven_day_aggregates_by_station(
@@ -1597,8 +1737,12 @@ def _seven_day_aggregates_by_station(
         if parameter_id is None:
             continue
 
+        station = stations_by_id.get(row.station_id)
+        if parameter_id == "air_temperature" and _is_suspect_road_station_temperature(station, row.value):
+            continue
+
         if parameter_id == "precipitation_1h":
-            if _is_precipitation_observation_suspect(stations_by_id.get(row.station_id), row.value):
+            if _is_precipitation_observation_suspect(station, row.value):
                 continue
             precipitation_totals[row.station_id] = precipitation_totals.get(row.station_id, 0.0) + row.value
 
@@ -1621,6 +1765,8 @@ def _seven_day_aggregates_by_station(
 def _is_precipitation_observation_suspect(station: Station | None, value: float | None) -> bool:
     if value is None or value < 0:
         return True
+    if _station_precipitation_is_excluded(station):
+        return True
 
     stationholder = (station.stationholder or "").lower() if station else ""
     is_strict_provider = bool(
@@ -1637,8 +1783,68 @@ def _is_precipitation_observation_suspect(station: Station | None, value: float 
     return value > 300
 
 
+def _station_precipitation_is_excluded(station: Station | None) -> bool:
+    return bool(station and station.source_id in EXCLUDED_PRECIPITATION_SOURCE_IDS)
+
+
+def _air_temperature_value_for_station(station: Station, value: float | None) -> float | None:
+    if _is_suspect_road_station_temperature(station, value):
+        return None
+    return value
+
+
+def _is_suspect_road_station_temperature(station: Station | None, value: float | None) -> bool:
+    return bool(
+        station
+        and value is not None
+        and _is_road_stationholder(station.stationholder)
+        and -40.5 <= value <= -39.5
+    )
+
+
+def _is_road_stationholder(stationholder: str | None) -> bool:
+    if not stationholder:
+        return False
+    normalized = stationholder.casefold()
+    return "statens vegvesen" in normalized or "svv" in normalized
+
+
 def _without_null_values(properties: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in properties.items() if value is not None}
+
+
+def _latest_properties_for_station(station: Station, latest: StationLatest) -> dict[str, Any]:
+    properties = _latest_properties(latest)
+    if _is_suspect_road_station_temperature(station, latest.air_temperature):
+        properties["air_temperature"] = None
+        properties["air_temperature_unit"] = None
+    if _is_suspect_road_station_temperature(station, latest.air_temperature_min):
+        properties["air_temperature_min"] = None
+        properties["air_temperature_min_unit"] = None
+    if _is_suspect_road_station_temperature(station, latest.air_temperature_max):
+        properties["air_temperature_max"] = None
+        properties["air_temperature_max_unit"] = None
+        properties["air_temperature_max_time"] = None
+    if not _station_precipitation_is_excluded(station):
+        return properties
+
+    for key in [
+        "precipitation_1h",
+        "precipitation_1h_unit",
+        "precipitation_1h_max",
+        "precipitation_1h_max_unit",
+        "precipitation_1h_max_period",
+        "precipitation_3h",
+        "precipitation_3h_unit",
+        "precipitation_3h_max",
+        "precipitation_3h_max_unit",
+        "precipitation_3h_max_period",
+        "precipitation_24h",
+        "precipitation_24h_unit",
+    ]:
+        properties[key] = None
+    properties["is_precipitation_suspect"] = True
+    return properties
 
 
 def _latest_properties(latest: StationLatest) -> dict[str, Any]:

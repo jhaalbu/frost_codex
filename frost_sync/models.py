@@ -70,6 +70,24 @@ class Observation(Base):
     station: Mapped[Station] = relationship(back_populates="observations")
 
 
+class NveDischargePercentile(Base):
+    __tablename__ = "nve_discharge_percentiles"
+    __table_args__ = (UniqueConstraint("station_id", "date_mmdd", name="uq_nve_discharge_percentile"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    station_id: Mapped[int] = mapped_column(ForeignKey("stations.id"), index=True)
+    source_id: Mapped[str] = mapped_column(String(64), index=True)
+    date_mmdd: Mapped[str] = mapped_column(String(5), index=True)
+    mean_value: Mapped[Optional[float]] = mapped_column(Float)
+    perc25: Mapped[Optional[float]] = mapped_column(Float)
+    perc75: Mapped[Optional[float]] = mapped_column(Float)
+    perc90: Mapped[Optional[float]] = mapped_column(Float)
+    perc95: Mapped[Optional[float]] = mapped_column(Float)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    station: Mapped[Station] = relationship()
+
+
 class StationLatest(Base):
     __tablename__ = "station_latest"
 

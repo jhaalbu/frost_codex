@@ -112,6 +112,8 @@ The response is intentionally simple:
 
 ## Data methods and filters
 
+See [docs/nve_discharge_classification.md](docs/nve_discharge_classification.md) for notes on HydAPI rating curves, percentiles and discharge classification fields for ArcGIS/VertiGIS symbolization.
+
 ### Providers
 
 - Frost is the main weather provider. Station metadata comes from Frost `sources`, while latest observations and recent snow observations come from Frost `observations`.
@@ -141,6 +143,7 @@ The response is intentionally simple:
 - Suspect precipitation is excluded from the latest precipitation value and from rolling/max precipitation calculations.
 - `is_precipitation_suspect` is set when the latest precipitation observation for a station was removed by this filter.
 - For `latest.7d.geojson`, the same strict 5 mm hourly threshold is used for NVE and Vegvesen/SVV precipitation before calculating max and accumulated precipitation.
+- Known stations `2.36.0` and `SN11000` are excluded from hourly precipitation because they have consistently reported values that do not behave like real one-hour precipitation.
 
 ### Snow filters
 
@@ -150,6 +153,19 @@ The response is intentionally simple:
 - For NVE snow depth, negative values are normalized to `0`, while values above `1000` are discarded as unrealistic.
 - `snow_depth_change` compares the latest snow depth against the closest observation around 24 hours earlier, using a 7-day lookup window.
 - If latest snow depth is `0` and no recent snow depth in the last 24 hours is above `0`, `snow_depth_change` is omitted.
+
+### Temperature filters
+
+- For SVV/Statens vegvesen stations, air temperature values from `-40.5` to `-39.5` are treated as sensor/error codes and omitted from latest values and derived temperature aggregates.
+
+### Discharge classification
+
+- NVE HydAPI discharge is normalized to the logical field `discharge`.
+- `sync-metadata` fetches HydAPI `Percentiles` for NVE stations with discharge series and stores them in `nve_discharge_percentiles`.
+- Compact GeoJSON endpoints classify latest discharge against the percentile row for the observation date.
+- The current percentile classes are `low`, `normal`, `high_minus`, `high` and `high_plus`.
+- This percentile classification is not the same as official NVE flood warning thresholds.
+- Run `init-db` once after deploying this change so the `nve_discharge_percentiles` table exists, then run `sync-metadata` to populate it.
 
 ### 24-hour derived fields
 

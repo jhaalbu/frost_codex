@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
@@ -60,6 +60,17 @@ class NveHydApiStation:
     stationholder: str | None
     active: bool | None
     series_specs: tuple[NveHydApiSeriesSpec, ...] = ()
+
+
+@dataclass(frozen=True)
+class NveHydApiDischargePercentile:
+    source_id: str
+    date_mmdd: str
+    mean_value: float | None
+    perc25: float | None
+    perc75: float | None
+    perc90: float | None
+    perc95: float | None
 
 
 class NveHydApiClient:
@@ -177,6 +188,31 @@ class NveHydApiClient:
             payload = self._get("/Series", params={"StationId": ",".join(batch)})
             specs.extend(_select_series_specs(payload.get("data", [])))
         return specs
+
+    def fetch_discharge_percentiles_for_station(self, source_id: str) -> list[NveHydApiDischargePercentile]:
+        payload = self._get(
+            f"/Percentiles/{source_id}/1001",
+            params={"Percentiles": "perc25,perc75,perc90,perc95"},
+        )
+        rows: list[NveHydApiDischargePercentile] = []
+        for item in payload.get("data", []):
+            if not isinstance(item, dict):
+                continue
+            date_mmdd = _percentile_date_mmdd(item)
+            if date_mmdd is None:
+                continue
+            rows.append(
+                NveHydApiDischargePercentile(
+                    source_id=_first_non_empty(item, "stationId", "StationId") or source_id,
+                    date_mmdd=date_mmdd,
+                    mean_value=_first_float(item, "mean", "Mean", "meanValue", "MeanValue"),
+                    perc25=_first_float(item, "perc25", "Perc25", "p25", "P25"),
+                    perc75=_first_float(item, "perc75", "Perc75", "p75", "P75"),
+                    perc90=_first_float(item, "perc90", "Perc90", "p90", "P90"),
+                    perc95=_first_float(item, "perc95", "Perc95", "p95", "P95"),
+                )
+            )
+        return rows
 
     def fetch_observations_range(
         self,
@@ -345,6 +381,9 @@ def _preferred_resolution_time(logical_element_id: str, series_item: dict[str, A
     if not available:
         return None
 
+    if logical_element_id == PRECIPITATION_1H_ELEMENT:
+        return 60 if 60 in available else None
+
     for preferred in RESOLUTION_PREFERENCES.get(logical_element_id, ()):
         if preferred in available:
             return preferred
@@ -413,10 +452,13 @@ def _logical_element_id(item: dict[str, Any]) -> str | None:
 
 def _is_better_resolution(logical_element_id: str, candidate_resolution: int, existing_resolution: int) -> bool:
     preference_order = RESOLUTION_PREFERENCES.get(logical_element_id, ())
-    try:
+    candidate_is_preferred = candidate_resolution in preference_order
+    existing_is_preferred = existing_resolution in preference_order
+    if candidate_is_preferred and existing_is_preferred:
         return preference_order.index(candidate_resolution) < preference_order.index(existing_resolution)
-    except ValueError:
-        return candidate_resolution < existing_resolution
+    if candidate_is_preferred != existing_is_preferred:
+        return candidate_is_preferred
+    return candidate_resolution < existing_resolution
 
 
 def _build_stationholder(item: dict[str, Any]) -> str:
@@ -516,6 +558,44 @@ def _parse_resolution_value(value: Any) -> int | None:
         return named[normalized]
     try:
         return int(normalized)
+    except ValueError:
+        return None
+
+
+def _percentile_date_mmdd(item: dict[str, Any]) -> str | None:
+    mmdd = _first_non_empty(item, "dateMMDD", "DateMMDD", "dateMmDd", "DateMmDd")
+    if mmdd and len(mmdd) == 4 and mmdd.isdigit():
+        return f"{mmdd[:2]}-{mmdd[2:]}"
+
+    month = _first_int(item, "month", "Month", "monthNo", "MonthNo")
+    day = _first_int(item, "day", "Day", "dayNo", "DayNo")
+    if month is not None and day is not None and 1 <= month <= 12 and 1 <= day <= 31:
+        return f"{month:02d}-{day:02d}"
+
+    day_of_year = _first_int(item, "dayOfYear", "DayOfYear", "dayNoOfYear", "DayNoOfYear")
+    if day_of_year is not None and 1 <= day_of_year <= 366:
+        value = datetime(2001, 1, 1, tzinfo=timezone.utc) + timedelta(days=day_of_year - 1)
+        return value.strftime("%m-%d")
+
+    text = _first_non_empty(
+        item,
+        "date",
+        "Date",
+        "time",
+        "Time",
+        "dateTime",
+        "DateTime",
+        "validDate",
+        "ValidDate",
+    )
+    if not text:
+        return None
+
+    stripped = text.strip()
+    if len(stripped) == 5 and stripped[2] == "-":
+        return stripped
+    try:
+        return datetime.fromisoformat(stripped.replace("Z", "+00:00")).strftime("%m-%d")
     except ValueError:
         return None
 

@@ -10,11 +10,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from frost_sync.frost_api import FrostClient, FrostSource, TARGET_ELEMENTS
-from frost_sync.models import Observation, Station, StationCapability, StationLatest
+from frost_sync.models import NveDischargePercentile, Observation, Station, StationCapability, StationLatest
 from frost_sync.nve_hydapi import (
     DISCHARGE_ELEMENT,
     GROUNDWATER_LEVEL_ELEMENT,
     NveHydApiClient,
+    NveHydApiDischargePercentile,
     NveHydApiSeriesSpec,
     NveHydApiStation,
 )
@@ -33,6 +34,7 @@ SNOW_DEPTH_ELEMENT_IDS = {SNOW_DEPTH_ELEMENT, SURFACE_SNOW_THICKNESS_ELEMENT}
 WIND_SPEED_ELEMENT = "wind_speed"
 WIND_DIRECTION_ELEMENT = "wind_from_direction"
 WIND_GUST_10M_ELEMENT = "max(wind_speed_of_gust PT10M)"
+EXCLUDED_PRECIPITATION_SOURCE_IDS = {"2.36.0", "SN11000"}
 
 
 ELEMENT_FIELD_MAP = {
@@ -302,6 +304,7 @@ class SyncService:
                 nve_station_rows = self.session.execute(
                     select(Station).where(Station.provider == "nve_hydapi")
                 ).scalars().all()
+                nve_stations_by_source = {station.source_id: station for station in nve_station_rows}
                 for station in nve_station_rows:
                     available_elements = {
                         element_id
@@ -313,6 +316,12 @@ class SyncService:
                         tracked_elements=NVE_TARGET_ELEMENTS,
                         available_elements=available_elements,
                     )
+                percentile_rows_updated = self._sync_nve_discharge_percentiles(
+                    source_ids=sorted(nve_station_ids_by_element.get(DISCHARGE_ELEMENT, set())),
+                    stations_by_source=nve_stations_by_source,
+                )
+                if percentile_rows_updated:
+                    logger.info("NVE discharge percentiles updated rows=%s", percentile_rows_updated)
 
         snower_station_count = 0
         if self.snower_client is not None:
@@ -663,6 +672,8 @@ class SyncService:
         preferred_by_station_and_element: dict[tuple[str, str], NveHydApiSeriesSpec] = {}
         for station in stations:
             for spec in station.series_specs:
+                if spec.logical_element_id == PRECIPITATION_1H_ELEMENT and spec.resolution_time != 60:
+                    continue
                 key = (spec.source_id, spec.logical_element_id)
                 current = preferred_by_station_and_element.get(key)
                 if current is None or spec.resolution_time < current.resolution_time:
@@ -674,6 +685,81 @@ class SyncService:
         for spec in series_specs:
             station_ids_by_element.setdefault(spec.logical_element_id, set()).add(spec.source_id)
         return station_ids_by_element
+
+    def _sync_nve_discharge_percentiles(
+        self,
+        source_ids: list[str],
+        stations_by_source: dict[str, Station],
+    ) -> int:
+        if self.nve_hydapi_client is None or not source_ids:
+            return 0
+
+        updated = 0
+        for source_id in source_ids:
+            station = stations_by_source.get(source_id)
+            if station is None:
+                continue
+            try:
+                rows = self.nve_hydapi_client.fetch_discharge_percentiles_for_station(source_id)
+            except Exception as exc:
+                logger.warning("Failed to sync NVE discharge percentiles for %s: %s", source_id, exc)
+                continue
+            updated += self._upsert_nve_discharge_percentile_rows(station, rows)
+        return updated
+
+    def _upsert_nve_discharge_percentile_rows(
+        self,
+        station: Station,
+        rows: Iterable[NveHydApiDischargePercentile],
+    ) -> int:
+        now = datetime.now(timezone.utc)
+        rows_by_date = {row.date_mmdd: row for row in rows}
+        if not rows_by_date:
+            return 0
+
+        existing = {
+            row.date_mmdd: row
+            for row in self.session.execute(
+                select(NveDischargePercentile).where(
+                    NveDischargePercentile.station_id == station.id,
+                    NveDischargePercentile.date_mmdd.in_(rows_by_date),
+                )
+            ).scalars()
+        }
+
+        updated = 0
+        for date_mmdd, source in rows_by_date.items():
+            row = existing.get(date_mmdd)
+            if row is None:
+                row = NveDischargePercentile(
+                    station_id=station.id,
+                    source_id=station.source_id,
+                    date_mmdd=date_mmdd,
+                    updated_at=now,
+                )
+                self.session.add(row)
+                updated += 1
+
+            changed = (
+                row.source_id != station.source_id
+                or row.mean_value != source.mean_value
+                or row.perc25 != source.perc25
+                or row.perc75 != source.perc75
+                or row.perc90 != source.perc90
+                or row.perc95 != source.perc95
+            )
+            if changed:
+                updated += 0 if row.id is None else 1
+
+            row.source_id = station.source_id
+            row.mean_value = source.mean_value
+            row.perc25 = source.perc25
+            row.perc75 = source.perc75
+            row.perc90 = source.perc90
+            row.perc95 = source.perc95
+            row.updated_at = now
+
+        return updated
 
     def _store_observations_batch(self, stations_by_source: dict[str, Station], observation_rows: list[dict]) -> tuple[int, int]:
         now = datetime.now(timezone.utc)
@@ -714,6 +800,7 @@ class SyncService:
 
             has_latest_change = False
             road_station_precipitation_is_suspect = _is_suspect_road_station_precipitation(station, row)
+            station_precipitation_is_excluded = station.source_id in EXCLUDED_PRECIPITATION_SOURCE_IDS
 
             for item in row.get("observations", []):
                 element_id = item.get("elementId")
@@ -731,7 +818,9 @@ class SyncService:
                 )
                 if normalized_value is None and element_id in SNOW_DEPTH_ELEMENT_IDS:
                     continue
-                if element_id in PRECIPITATION_ELEMENT_IDS and road_station_precipitation_is_suspect:
+                if element_id in PRECIPITATION_ELEMENT_IDS and (
+                    road_station_precipitation_is_suspect or station_precipitation_is_excluded
+                ):
                     current_time = _ensure_utc(latest.observed_at)
                     should_update = current_time is None or reference_time >= current_time
                     if should_update:
@@ -872,7 +961,13 @@ class SyncService:
             [row for row in rows if row.element_id in PRECIPITATION_ELEMENT_IDS and row.value is not None],
             key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
         )
-        temperature_rows = [row for row in rows if row.element_id == AIR_TEMPERATURE_ELEMENT and row.value is not None]
+        temperature_rows = [
+            row
+            for row in rows
+            if row.element_id == AIR_TEMPERATURE_ELEMENT
+            and row.value is not None
+            and not _is_suspect_road_station_temperature(station, row.value)
+        ]
         snow_depth_rows = sorted(
             [row for row in rows if row.element_id in SNOW_DEPTH_ELEMENT_IDS and row.value is not None],
             key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
@@ -1038,6 +1133,9 @@ def _extract_quality_code(value: int | str | None) -> int | None:
 
 
 def _is_suspect_road_station_precipitation(station: Station, row: dict) -> bool:
+    if station.source_id in EXCLUDED_PRECIPITATION_SOURCE_IDS:
+        return True
+
     if station.provider == "nve_hydapi":
         return _is_suspect_nve_precipitation(row)
 
@@ -1070,6 +1168,14 @@ def _is_road_stationholder(stationholder: str | None) -> bool:
     return "statens vegvesen" in normalized or "svv" in normalized
 
 
+def _is_suspect_road_station_temperature(station: Station, value: float | None) -> bool:
+    return bool(
+        value is not None
+        and _is_road_stationholder(station.stationholder)
+        and -40.5 <= value <= -39.5
+    )
+
+
 def _observation_value_for_element(observations: list[dict], element_id: str) -> float | None:
     for item in observations:
         if item.get("elementId") != element_id:
@@ -1089,6 +1195,9 @@ def _filter_suspect_road_station_precipitation(
     station: Station,
     precipitation_rows: list[Observation],
 ) -> list[Observation]:
+    if station.source_id in EXCLUDED_PRECIPITATION_SOURCE_IDS:
+        return []
+
     filtered: list[Observation] = []
     for row in precipitation_rows:
         if (
@@ -1278,6 +1387,13 @@ def _normalize_observation_value(
             return 0.0
         if numeric_value <= -3:
             return None
+
+    if (
+        element_id == AIR_TEMPERATURE_ELEMENT
+        and station is not None
+        and _is_suspect_road_station_temperature(station, numeric_value)
+    ):
+        return None
 
     return numeric_value
 
