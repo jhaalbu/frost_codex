@@ -249,11 +249,18 @@ class NveHydApiClient:
         return _select_series_specs(payload.get("data", []))
 
     def fetch_series_specs_for_stations(self, source_ids: list[str]) -> list[NveHydApiSeriesSpec]:
-        specs: list[NveHydApiSeriesSpec] = []
-        for batch in _chunked(source_ids, 50):
-            payload = self._get("/Series", params={"StationId": ",".join(batch)})
-            specs.extend(_select_series_specs(payload.get("data", [])))
-        return specs
+        if not source_ids:
+            return []
+        source_id_set = set(source_ids)
+        payload = self._get("/Series", params={})
+        return _select_series_specs(
+            [
+                item
+                for item in payload.get("data", [])
+                if isinstance(item, dict)
+                and _first_non_empty(item, "stationId", "StationId") in source_id_set
+            ]
+        )
 
     def fetch_discharge_percentile_source_ids(self) -> set[str]:
         payload = self._get("/Percentiles", params={})
