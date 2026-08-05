@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import re
 from typing import Any
 
 import requests
@@ -45,6 +46,7 @@ class NveHydApiSeriesSpec:
     logical_element_id: str
     resolution_time: int
     unit: str | None
+    version_number: int | None = None
 
 
 @dataclass(frozen=True)
@@ -68,9 +70,20 @@ class NveHydApiDischargePercentile:
     date_mmdd: str
     mean_value: float | None
     perc25: float | None
+    perc60: float | None
     perc75: float | None
     perc90: float | None
     perc95: float | None
+
+
+@dataclass(frozen=True)
+class NveDischargeFloodThresholds:
+    source_id: str
+    series_version: int
+    discharge_qm: float | None
+    discharge_q5: float | None
+    discharge_q50: float | None
+    unit: str = "m3/s"
 
 
 class NveHydApiClient:
@@ -86,6 +99,54 @@ class NveHydApiClient:
                 "X-API-Key": api_key,
                 "User-Agent": "frost-sync/1.0",
             }
+        )
+        self.chart_session = requests.Session()
+        self.chart_session.trust_env = False
+        self.chart_session.headers.update(
+            {
+                "Accept": "application/json",
+                "User-Agent": "frost-sync/1.0",
+            }
+        )
+
+    def fetch_discharge_flood_thresholds(
+        self,
+        source_id: str,
+        series_version: int,
+    ) -> NveDischargeFloodThresholds:
+        now = datetime.now(timezone.utc)
+        from_dt = now - timedelta(days=1)
+        chart_time = f"{from_dt:%Y%m%dT%H%M};{now:%Y%m%dT%H%M}"
+        series_id = f"{source_id}.1001.{series_version}"
+        response = self.chart_session.get(
+            "https://chartserver.nve.no/ShowData.aspx",
+            params={
+                "vfmt": "json",
+                "ver": "1.0",
+                "req": "getchart",
+                "time": "null;null",
+                "lang": "no",
+                "chd": (
+                    f"ds=htsr,id={series_id},da=1,time={chart_time},"
+                    "rt=0,mth=inst,stat=qcm;qc5;qc50"
+                ),
+            },
+            timeout=self.timeout_seconds,
+        )
+        try:
+            response.raise_for_status()
+        except HTTPError as exc:
+            raise RuntimeError(
+                f"NVE Chartserver request failed for {series_id}: {response.text}"
+            ) from exc
+
+        values = _parse_chartserver_flood_thresholds(response.json())
+        return NveDischargeFloodThresholds(
+            source_id=source_id,
+            series_version=series_version,
+            discharge_qm=values.get("qcm"),
+            discharge_q5=values.get("qc5"),
+            discharge_q50=values.get("qc50"),
         )
 
     def fetch_stations(self, only_active: bool = True) -> list[NveHydApiStation]:
@@ -134,6 +195,11 @@ class NveHydApiClient:
                         "stationId": spec.source_id,
                         "parameter": spec.parameter,
                         "resolutionTime": str(spec.resolution_time),
+                        **(
+                            {"versionNumber": str(spec.version_number)}
+                            if spec.version_number is not None
+                            else {}
+                        ),
                     }
                     for spec in batch
                 ],
@@ -206,7 +272,7 @@ class NveHydApiClient:
     def fetch_discharge_percentiles_for_station(self, source_id: str) -> list[NveHydApiDischargePercentile]:
         payload = self._get(
             f"/Percentiles/{source_id}/1001",
-            params={"Percentiles": "perc25,perc75,perc90,perc95"},
+            params={"Percentiles": "perc25,perc60,perc75,perc90,perc95"},
         )
         rows: list[NveHydApiDischargePercentile] = []
         for item in payload.get("data", []):
@@ -221,6 +287,7 @@ class NveHydApiClient:
                     date_mmdd=date_mmdd,
                     mean_value=_first_float(item, "mean", "Mean", "meanValue", "MeanValue"),
                     perc25=_first_float(item, "perc25", "Perc25", "p25", "P25"),
+                    perc60=_first_float(item, "perc60", "Perc60", "p60", "P60"),
                     perc75=_first_float(item, "perc75", "Perc75", "p75", "P75"),
                     perc90=_first_float(item, "perc90", "Perc90", "p90", "P90"),
                     perc95=_first_float(item, "perc95", "Perc95", "p95", "P95"),
@@ -250,6 +317,11 @@ class NveHydApiClient:
                         "parameter": spec.parameter,
                         "resolutionTime": str(spec.resolution_time),
                         "referenceTime": reference_time,
+                        **(
+                            {"versionNumber": str(spec.version_number)}
+                            if spec.version_number is not None
+                            else {}
+                        ),
                     }
                     for spec in batch
                 ],
@@ -368,14 +440,21 @@ def _extract_series_specs(source_id: str, station_item: dict[str, Any]) -> list[
             logical_element_id=logical_element_id,
             resolution_time=resolution_time,
             unit=_first_non_empty(raw_item, "unit", "Unit"),
+            version_number=_first_int(
+                raw_item,
+                "serieVersionNo",
+                "SerieVersionNo",
+                "seriesVersionNo",
+                "SeriesVersionNo",
+                "versionNumber",
+                "VersionNumber",
+                "versionNo",
+                "VersionNo",
+            ),
         )
 
         existing = selected.get(logical_element_id)
-        if existing is None or _is_better_resolution(
-            logical_element_id=logical_element_id,
-            candidate_resolution=resolution_time,
-            existing_resolution=existing.resolution_time,
-        ):
+        if existing is None or _is_better_series_spec(candidate, existing):
             selected[logical_element_id] = candidate
 
     return list(selected.values())
@@ -650,16 +729,75 @@ def _select_series_specs(items: list[dict[str, Any]]) -> list[NveHydApiSeriesSpe
             logical_element_id=logical_element_id,
             resolution_time=resolution_time,
             unit=_first_non_empty(item, "unit", "Unit"),
+            version_number=_first_int(
+                item,
+                "serieVersionNo",
+                "SerieVersionNo",
+                "seriesVersionNo",
+                "SeriesVersionNo",
+                "versionNumber",
+                "VersionNumber",
+                "versionNo",
+                "VersionNo",
+            ),
         )
         key = (source_id, logical_element_id)
         existing = selected.get(key)
-        if existing is None or _is_better_resolution(
-            logical_element_id=logical_element_id,
-            candidate_resolution=resolution_time,
-            existing_resolution=existing.resolution_time,
-        ):
+        if existing is None or _is_better_series_spec(candidate, existing):
             selected[key] = candidate
     return list(selected.values())
+
+
+def _is_better_series_spec(
+    candidate: NveHydApiSeriesSpec,
+    existing: NveHydApiSeriesSpec,
+) -> bool:
+    if _is_better_resolution(
+        logical_element_id=candidate.logical_element_id,
+        candidate_resolution=candidate.resolution_time,
+        existing_resolution=existing.resolution_time,
+    ):
+        return True
+    if candidate.resolution_time != existing.resolution_time:
+        return False
+    return (candidate.version_number or -1) > (existing.version_number or -1)
+
+
+def _parse_chartserver_flood_thresholds(payload: Any) -> dict[str, float]:
+    if not isinstance(payload, list):
+        raise RuntimeError("NVE Chartserver returned an unexpected flood-threshold payload")
+
+    values: dict[str, float] = {}
+    for series in payload:
+        if not isinstance(series, dict):
+            continue
+        statistics = series.get("Statistics") or series.get("statistics") or []
+        for statistic in statistics:
+            if not isinstance(statistic, dict):
+                continue
+            legend = str(statistic.get("LegendText") or statistic.get("legendText") or "")
+            match = re.search(r"\((qcm|qc5|qc50)\)\s*$", legend, flags=re.IGNORECASE)
+            if match is None:
+                continue
+            points = statistic.get("SeriesPoints") or statistic.get("seriesPoints") or []
+            value = next(
+                (
+                    _first_float(point, "Value", "value")
+                    for point in points
+                    if isinstance(point, dict) and _first_float(point, "Value", "value") is not None
+                ),
+                None,
+            )
+            if value is not None:
+                values[match.group(1).casefold()] = value
+
+    missing = {"qcm", "qc5", "qc50"} - values.keys()
+    if missing:
+        raise RuntimeError(
+            "NVE Chartserver returned incomplete flood thresholds: "
+            + ", ".join(sorted(missing))
+        )
+    return values
 
 
 def _isoformat_utc(value: datetime) -> str:

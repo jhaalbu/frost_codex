@@ -10,7 +10,14 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from frost_sync.frost_api import FrostClient, FrostSource, TARGET_ELEMENTS
-from frost_sync.models import NveDischargePercentile, Observation, Station, StationCapability, StationLatest
+from frost_sync.models import (
+    NveDischargeFloodThreshold,
+    NveDischargePercentile,
+    Observation,
+    Station,
+    StationCapability,
+    StationLatest,
+)
 from frost_sync.nve_hydapi import (
     DISCHARGE_ELEMENT,
     GROUNDWATER_LEVEL_ELEMENT,
@@ -18,6 +25,7 @@ from frost_sync.nve_hydapi import (
     NveHydApiDischargePercentile,
     NveHydApiSeriesSpec,
     NveHydApiStation,
+    NveDischargeFloodThresholds,
 )
 from frost_sync.snower_api import SnowerClient, SnowerMonitor
 
@@ -297,9 +305,22 @@ class SyncService:
             nve_stations = self.nve_hydapi_client.fetch_stations()
             self._upsert_nve_stations(nve_stations)
             nve_station_count = len(nve_stations)
-            nve_station_ids_by_element = self._nve_station_ids_by_element(
-                self._preferred_nve_series_specs(nve_stations)
+            try:
+                discovered_nve_specs = self.nve_hydapi_client.fetch_series_specs_for_stations(
+                    [station.source_id for station in nve_stations]
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to fetch full NVE series metadata; using station metadata fallback: %s",
+                    exc,
+                )
+                discovered_nve_specs = []
+            preferred_nve_specs = (
+                discovered_nve_specs
+                if discovered_nve_specs
+                else self._preferred_nve_series_specs(nve_stations)
             )
+            nve_station_ids_by_element = self._nve_station_ids_by_element(preferred_nve_specs)
             if nve_station_ids_by_element:
                 nve_station_rows = self.session.execute(
                     select(Station).where(Station.provider == "nve_hydapi")
@@ -331,6 +352,16 @@ class SyncService:
                 )
                 if percentile_rows_updated:
                     logger.info("NVE discharge percentiles updated rows=%s", percentile_rows_updated)
+                flood_rows_updated = self._sync_nve_discharge_flood_thresholds(
+                    series_specs=[
+                        spec
+                        for spec in preferred_nve_specs
+                        if spec.logical_element_id == DISCHARGE_ELEMENT
+                    ],
+                    stations_by_source=nve_stations_by_source,
+                )
+                if flood_rows_updated:
+                    logger.info("NVE discharge flood thresholds updated rows=%s", flood_rows_updated)
 
         snower_station_count = 0
         if self.snower_client is not None:
@@ -691,7 +722,10 @@ class SyncService:
                     continue
                 key = (spec.source_id, spec.logical_element_id)
                 current = preferred_by_station_and_element.get(key)
-                if current is None or spec.resolution_time < current.resolution_time:
+                if current is None or spec.resolution_time < current.resolution_time or (
+                    spec.resolution_time == current.resolution_time
+                    and (spec.version_number or -1) > (current.version_number or -1)
+                ):
                     preferred_by_station_and_element[key] = spec
         return list(preferred_by_station_and_element.values())
 
@@ -759,6 +793,7 @@ class SyncService:
                 row.source_id != station.source_id
                 or row.mean_value != source.mean_value
                 or row.perc25 != source.perc25
+                or row.perc60 != source.perc60
                 or row.perc75 != source.perc75
                 or row.perc90 != source.perc90
                 or row.perc95 != source.perc95
@@ -769,12 +804,77 @@ class SyncService:
             row.source_id = station.source_id
             row.mean_value = source.mean_value
             row.perc25 = source.perc25
+            row.perc60 = source.perc60
             row.perc75 = source.perc75
             row.perc90 = source.perc90
             row.perc95 = source.perc95
             row.updated_at = now
 
         return updated
+
+    def _sync_nve_discharge_flood_thresholds(
+        self,
+        series_specs: Iterable[NveHydApiSeriesSpec],
+        stations_by_source: dict[str, Station],
+    ) -> int:
+        if self.nve_hydapi_client is None:
+            return 0
+
+        updated = 0
+        for spec in series_specs:
+            station = stations_by_source.get(spec.source_id)
+            if station is None:
+                continue
+            if spec.version_number is None:
+                logger.info(
+                    "Skipping NVE flood thresholds for %s because the discharge series version is unknown.",
+                    spec.source_id,
+                )
+                continue
+            try:
+                thresholds = self.nve_hydapi_client.fetch_discharge_flood_thresholds(
+                    source_id=spec.source_id,
+                    series_version=spec.version_number,
+                )
+            except Exception as exc:
+                logger.warning("Failed to sync NVE flood thresholds for %s: %s", spec.source_id, exc)
+                continue
+            updated += self._upsert_nve_discharge_flood_threshold(station, thresholds)
+        return updated
+
+    def _upsert_nve_discharge_flood_threshold(
+        self,
+        station: Station,
+        source: NveDischargeFloodThresholds,
+    ) -> int:
+        row = self.session.get(NveDischargeFloodThreshold, station.id)
+        is_new = row is None
+        if row is None:
+            row = NveDischargeFloodThreshold(
+                station_id=station.id,
+                source_id=station.source_id,
+                series_version=source.series_version,
+                unit=source.unit,
+                updated_at=datetime.now(timezone.utc),
+            )
+            self.session.add(row)
+
+        changed = is_new or (
+            row.source_id != station.source_id
+            or row.series_version != source.series_version
+            or row.discharge_qm != source.discharge_qm
+            or row.discharge_q5 != source.discharge_q5
+            or row.discharge_q50 != source.discharge_q50
+            or row.unit != source.unit
+        )
+        row.source_id = station.source_id
+        row.series_version = source.series_version
+        row.discharge_qm = source.discharge_qm
+        row.discharge_q5 = source.discharge_q5
+        row.discharge_q50 = source.discharge_q50
+        row.unit = source.unit
+        row.updated_at = datetime.now(timezone.utc)
+        return int(changed)
 
     def _store_observations_batch(self, stations_by_source: dict[str, Station], observation_rows: list[dict]) -> tuple[int, int]:
         now = datetime.now(timezone.utc)

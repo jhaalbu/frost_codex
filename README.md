@@ -12,6 +12,7 @@ The local development setup uses SQLite by default. The code is structured so th
 - `station_capabilities`: which supported elements each station exposes
 - `observations`: history table with one row per element and timestamp
 - `station_latest`: one row per station with latest values for map display, including rolling precipitation for the last 24 hours, plus hydrology fields like `discharge` and `groundwater_level`
+- `nve_discharge_flood_thresholds`: cached NVE Chartserver thresholds for kulminert middelflom, 5-year flood and 50-year flood
 - `stations.stationholder`: the Frost station holder, exposed as `stationholder` in GeoJSON
 
 ## Quick start
@@ -167,10 +168,14 @@ See [docs/nve_discharge_classification.md](docs/nve_discharge_classification.md)
 
 - NVE HydAPI discharge is normalized to the logical field `discharge`.
 - `sync-metadata` fetches HydAPI `Percentiles` for NVE stations with discharge series and stores them in `nve_discharge_percentiles`.
-- Compact GeoJSON endpoints classify latest discharge against the percentile row for the observation date.
+- `sync-metadata` also uses the HydAPI discharge series version to fetch Chartserver statistics `QCm`, `QC5` and `QC50`, stored as `discharge_flood_qm`, `discharge_flood_q5` and `discharge_flood_q50` thresholds.
+- Latest GeoJSON endpoints classify latest discharge against the percentile row for the observation date.
+- Flood thresholds take priority over percentiles: at or above `Q50` is `flood_over_50y`, at or above `Q5` is `flood_5y_to_50y`, and at or above `QM` is `flood_mean_to_5y`. Values below `QM`, or stations without flood thresholds, use the existing percentile classification.
+- Chartserver errors and missing series versions are handled per station; existing stored thresholds and percentile classification remain available.
 - The current percentile classes are `low`, `normal`, `high_minus`, `high` and `high_plus`.
+- Percentile bands are `< P25 = low`, `P25-P60 = normal`, `P60-P75 = high_minus`, `P75-P90 = high`, and `>= P90 = high_plus`. Flood classes override these bands when `QM`, `Q5` or `Q50` is reached.
 - This percentile classification is not the same as official NVE flood warning thresholds.
-- Run `init-db` once after deploying this change so the `nve_discharge_percentiles` table exists, then run `sync-metadata` to populate it.
+- Run `init-db` once after deploying this change so the NVE percentile and flood-threshold tables exist, then run `sync-metadata` to populate them.
 
 ### 24-hour derived fields
 

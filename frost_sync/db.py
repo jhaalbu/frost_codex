@@ -36,6 +36,13 @@ def upgrade_schema(database_url: str) -> None:
         if "stationholder" not in station_columns:
             ddl_statements.append("ALTER TABLE stations ADD COLUMN stationholder VARCHAR(512)")
 
+    if "nve_discharge_percentiles" in tables:
+        percentile_columns = {
+            column["name"] for column in inspector.get_columns("nve_discharge_percentiles")
+        }
+        if "perc60" not in percentile_columns:
+            ddl_statements.append("ALTER TABLE nve_discharge_percentiles ADD COLUMN perc60 FLOAT")
+
     if "station_latest" not in tables:
         with engine.begin() as connection:
             for ddl in ddl_statements:

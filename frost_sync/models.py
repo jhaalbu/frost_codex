@@ -80,9 +80,25 @@ class NveDischargePercentile(Base):
     date_mmdd: Mapped[str] = mapped_column(String(5), index=True)
     mean_value: Mapped[Optional[float]] = mapped_column(Float)
     perc25: Mapped[Optional[float]] = mapped_column(Float)
+    perc60: Mapped[Optional[float]] = mapped_column(Float)
     perc75: Mapped[Optional[float]] = mapped_column(Float)
     perc90: Mapped[Optional[float]] = mapped_column(Float)
     perc95: Mapped[Optional[float]] = mapped_column(Float)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    station: Mapped[Station] = relationship()
+
+
+class NveDischargeFloodThreshold(Base):
+    __tablename__ = "nve_discharge_flood_thresholds"
+
+    station_id: Mapped[int] = mapped_column(ForeignKey("stations.id"), primary_key=True)
+    source_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    series_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    discharge_qm: Mapped[Optional[float]] = mapped_column(Float)
+    discharge_q5: Mapped[Optional[float]] = mapped_column(Float)
+    discharge_q50: Mapped[Optional[float]] = mapped_column(Float)
+    unit: Mapped[str] = mapped_column(String(64), nullable=False, default="m3/s")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     station: Mapped[Station] = relationship()

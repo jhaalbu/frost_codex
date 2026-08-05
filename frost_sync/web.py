@@ -13,7 +13,14 @@ from sqlalchemy import and_, select
 from frost_sync.config import Settings, load_settings
 from frost_sync.db import create_session_factory
 from frost_sync.frost_api import FrostClient
-from frost_sync.models import NveDischargePercentile, Observation, Station, StationCapability, StationLatest
+from frost_sync.models import (
+    NveDischargeFloodThreshold,
+    NveDischargePercentile,
+    Observation,
+    Station,
+    StationCapability,
+    StationLatest,
+)
 from frost_sync.nve_hydapi import NveHydApiClient
 from frost_sync.snower_api import SnowerClient
 
@@ -413,6 +420,7 @@ def build_latest_geojson(session_factory, has_filter: str | None = None) -> dict
         )
         capabilities = _load_capabilities(session)
         discharge_percentiles = _load_discharge_percentiles(session, rows)
+        flood_thresholds = _load_discharge_flood_thresholds(session, rows)
 
     features = []
     for station, latest in rows:
@@ -441,6 +449,7 @@ def build_latest_geojson(session_factory, has_filter: str | None = None) -> dict
                         station,
                         latest,
                         discharge_percentiles.get(_discharge_percentile_key(station, latest)),
+                        flood_thresholds.get(station.id),
                     ),
                 },
             }
@@ -460,6 +469,7 @@ def build_latest_compact_geojson(session_factory) -> dict[str, Any]:
             .all()
         )
         discharge_percentiles = _load_discharge_percentiles(session, rows)
+        flood_thresholds = _load_discharge_flood_thresholds(session, rows)
 
     features = []
     for station, latest in rows:
@@ -479,6 +489,7 @@ def build_latest_compact_geojson(session_factory) -> dict[str, Any]:
                     station,
                     latest,
                     discharge_percentiles.get(_discharge_percentile_key(station, latest)),
+                    flood_thresholds.get(station.id),
                 ),
             }
         )
@@ -515,6 +526,7 @@ def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
             .all()
         )
         discharge_percentiles = _load_discharge_percentiles(session, rows)
+        flood_thresholds = _load_discharge_flood_thresholds(session, rows)
 
     stations_by_id = {station.id: station for station, _latest in rows}
     aggregates_by_station = _seven_day_aggregates_by_station(observation_rows, stations_by_id)
@@ -537,6 +549,7 @@ def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
                 station,
                 latest,
                 discharge_percentiles.get(_discharge_percentile_key(station, latest)),
+                flood_thresholds.get(station.id),
             ),
         }
 
@@ -1591,6 +1604,7 @@ def _compact_latest_properties(
     station: Station,
     latest: StationLatest,
     discharge_percentile: NveDischargePercentile | None = None,
+    flood_threshold: NveDischargeFloodThreshold | None = None,
 ) -> dict[str, Any]:
     properties = {
         **_compact_latest_base_properties(station, latest),
@@ -1612,7 +1626,7 @@ def _compact_latest_properties(
         "discharge_observed_at": _isoformat(latest.discharge_observed_at),
         "groundwater_level": latest.groundwater_level,
         "groundwater_level_observed_at": _isoformat(latest.groundwater_level_observed_at),
-        **_discharge_classification_properties(station, latest, discharge_percentile),
+        **_discharge_classification_properties(station, latest, discharge_percentile, flood_threshold),
     }
     return _without_null_values(properties)
 
@@ -1644,6 +1658,25 @@ def _load_discharge_percentiles(
     return {(row.station_id, row.date_mmdd): row for row in percentile_rows}
 
 
+def _load_discharge_flood_thresholds(
+    session,
+    rows: list[tuple[Station, StationLatest]],
+) -> dict[int, NveDischargeFloodThreshold]:
+    station_ids = {
+        station.id
+        for station, _latest in rows
+        if station.provider == "nve_hydapi"
+    }
+    if not station_ids:
+        return {}
+    threshold_rows = session.execute(
+        select(NveDischargeFloodThreshold).where(
+            NveDischargeFloodThreshold.station_id.in_(station_ids)
+        )
+    ).scalars().all()
+    return {row.station_id: row for row in threshold_rows}
+
+
 def _discharge_percentile_key(station: Station, latest: StationLatest) -> tuple[int, str] | None:
     if station.provider != "nve_hydapi" or latest.discharge is None:
         return None
@@ -1657,6 +1690,7 @@ def _discharge_classification_properties(
     station: Station,
     latest: StationLatest,
     percentile: NveDischargePercentile | None,
+    flood_threshold: NveDischargeFloodThreshold | None = None,
 ) -> dict[str, Any]:
     observed_at = _ensure_utc(latest.discharge_observed_at)
     age_hours = None
@@ -1670,6 +1704,12 @@ def _discharge_classification_properties(
         "discharge_observed_at": _isoformat(observed_at),
         "discharge_age_hours": age_hours,
         "discharge_age_class": _discharge_age_class(age_hours),
+        "discharge_flood_qm": flood_threshold.discharge_qm if flood_threshold else None,
+        "discharge_flood_q5": flood_threshold.discharge_q5 if flood_threshold else None,
+        "discharge_flood_q50": flood_threshold.discharge_q50 if flood_threshold else None,
+        "discharge_flood_unit": flood_threshold.unit if flood_threshold else None,
+        "discharge_flood_series_version": flood_threshold.series_version if flood_threshold else None,
+        "discharge_flood_updated_at": _isoformat(flood_threshold.updated_at) if flood_threshold else None,
     }
     if latest.discharge is None:
         return {
@@ -1680,6 +1720,22 @@ def _discharge_classification_properties(
             "discharge_value_missing": True,
             "discharge_classification_missing": None,
         }
+
+    if station.provider == "nve_hydapi" and flood_threshold is not None:
+        flood_classification = _classify_discharge_by_flood_threshold(
+            latest.discharge,
+            flood_threshold,
+        )
+        if flood_classification is not None:
+            discharge_class, rank = flood_classification
+            return {
+                **base,
+                "discharge_class": discharge_class,
+                "discharge_class_rank": rank,
+                "discharge_class_source": "flood_threshold",
+                "discharge_value_missing": None,
+                "discharge_classification_missing": None,
+            }
 
     if station.provider != "nve_hydapi" or percentile is None:
         return {
@@ -1702,6 +1758,7 @@ def _discharge_classification_properties(
         "discharge_classification_missing": classification_missing or None,
         "discharge_percentile_date": percentile.date_mmdd,
         "discharge_perc25": percentile.perc25,
+        "discharge_perc60": percentile.perc60,
         "discharge_perc75": percentile.perc75,
         "discharge_perc90": percentile.perc90,
         "discharge_perc95": percentile.perc95,
@@ -1712,17 +1769,35 @@ def _classify_discharge_by_percentile(
     value: float,
     percentile: NveDischargePercentile,
 ) -> tuple[str, int]:
-    if percentile.perc25 is None or percentile.perc75 is None:
+    if (
+        percentile.perc25 is None
+        or percentile.perc60 is None
+        or percentile.perc75 is None
+        or percentile.perc90 is None
+    ):
         return "missing_classification", 10
-    if percentile.perc95 is not None and value >= percentile.perc95:
+    if value >= percentile.perc90:
         return "high_plus", 60
-    if percentile.perc90 is not None and value >= percentile.perc90:
-        return "high", 50
     if value >= percentile.perc75:
+        return "high", 50
+    if value >= percentile.perc60:
         return "high_minus", 40
-    if value < percentile.perc25:
-        return "low", 20
-    return "normal", 30
+    if value >= percentile.perc25:
+        return "normal", 30
+    return "low", 20
+
+
+def _classify_discharge_by_flood_threshold(
+    value: float,
+    threshold: NveDischargeFloodThreshold,
+) -> tuple[str, int] | None:
+    if threshold.discharge_q50 is not None and value >= threshold.discharge_q50:
+        return "flood_over_50y", 90
+    if threshold.discharge_q5 is not None and value >= threshold.discharge_q5:
+        return "flood_5y_to_50y", 80
+    if threshold.discharge_qm is not None and value >= threshold.discharge_qm:
+        return "flood_mean_to_5y", 70
+    return None
 
 
 def _discharge_age_class(age_hours: float | None) -> str:

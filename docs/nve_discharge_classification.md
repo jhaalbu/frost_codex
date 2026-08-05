@@ -30,7 +30,7 @@ Rating curves do not tell us whether the current discharge is:
 - between mean annual flood and 5-year flood
 - large, normal or low discharge
 
-Those classes require classification thresholds. HydAPI rating curves only convert water stage to discharge. For flood classes, we need a threshold source such as a local table with flood return values, another NVE service, or manually curated thresholds per station.
+Those classes require classification thresholds. HydAPI rating curves only convert water stage to discharge. This app now obtains the thresholds from NVE Chartserver statistics for the versioned discharge series and stores them locally.
 
 HydAPI `Percentiles` can help classify normal, high and low flow if percentile data exists for the station/parameter, but percentiles are separate from rating curves.
 
@@ -97,10 +97,10 @@ Flood-threshold classification:
 
 Percentile-based fallback:
 
-- `discharge >= perc95`: `high_plus`
-- `perc90 <= discharge < perc95`: `high`
-- `perc75 <= discharge < perc90`: `high_minus`
-- `perc25 <= discharge < perc75`: `normal`
+- `discharge >= perc90`: `high_plus`
+- `perc75 <= discharge < perc90`: `high`
+- `perc60 <= discharge < perc75`: `high_minus`
+- `perc25 <= discharge < perc60`: `normal`
 - `discharge < perc25`: `low`
 
 This is a practical percentile-based classification, not the same as NVE flood warning thresholds.
@@ -141,6 +141,7 @@ The app stores HydAPI discharge percentiles in `nve_discharge_percentiles` when 
 - `discharge_value_missing`
 - `discharge_percentile_date`
 - `discharge_perc25`
+- `discharge_perc60`
 - `discharge_perc75`
 - `discharge_perc90`
 - `discharge_perc95`
@@ -154,6 +155,21 @@ discharge_classification_missing = true
 ```
 
 If a station has percentile data, `discharge_class_source = percentile`.
+
+## Flood-threshold implementation
+
+For an NVE discharge series such as `84.21.0.1001.1`, `84.21.0` is the station ID, `1001` is the discharge parameter and the final `1` is the series version. The version is discovered from HydAPI series metadata rather than assumed.
+
+During `sync-metadata`, the app requests Chartserver statistics `qcm`, `qc5` and `qc50` and stores one `nve_discharge_flood_thresholds` row per station. GeoJSON exposes:
+
+- `discharge_flood_qm`
+- `discharge_flood_q5`
+- `discharge_flood_q50`
+- `discharge_flood_unit`
+- `discharge_flood_series_version`
+- `discharge_flood_updated_at`
+
+Flood classification takes priority when the latest discharge reaches a flood threshold. Below `QM`, the daily HydAPI percentile classification remains the fallback. A Chartserver error affects only that station and does not delete a previously stored threshold row.
 
 Deployment notes:
 
