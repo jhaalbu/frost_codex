@@ -45,12 +45,14 @@ def upgrade_schema(database_url: str) -> None:
     columns = {column["name"] for column in inspector.get_columns("station_latest")}
 
     expected_columns = {
+        "air_temperature_observed_at": "DATETIME",
         "air_temperature_min": "FLOAT",
         "air_temperature_min_unit": "VARCHAR(64)",
         "air_temperature_max": "FLOAT",
         "air_temperature_max_unit": "VARCHAR(64)",
         "air_temperature_max_time": "VARCHAR(64)",
         "precipitation_1h_max": "FLOAT",
+        "precipitation_observed_at": "DATETIME",
         "precipitation_1h_max_unit": "VARCHAR(64)",
         "precipitation_1h_max_period": "VARCHAR(128)",
         "is_precipitation_suspect": "BOOLEAN NOT NULL DEFAULT 0",
@@ -62,16 +64,21 @@ def upgrade_schema(database_url: str) -> None:
         "precipitation_24h": "FLOAT",
         "precipitation_24h_unit": "VARCHAR(64)",
         "snow_depth_change": "FLOAT",
+        "snow_depth_observed_at": "DATETIME",
         "snow_depth_change_unit": "VARCHAR(64)",
         "wind_speed_max": "FLOAT",
+        "wind_speed_observed_at": "DATETIME",
         "wind_speed_max_unit": "VARCHAR(64)",
         "wind_speed_max_time": "VARCHAR(64)",
         "wind_from_direction_max": "FLOAT",
+        "wind_from_direction_observed_at": "DATETIME",
         "wind_from_direction_max_unit": "VARCHAR(64)",
         "discharge": "FLOAT",
         "discharge_unit": "VARCHAR(64)",
+        "discharge_observed_at": "DATETIME",
         "groundwater_level": "FLOAT",
         "groundwater_level_unit": "VARCHAR(64)",
+        "groundwater_level_observed_at": "DATETIME",
     }
 
     for column_name, column_type in expected_columns.items():
@@ -81,6 +88,56 @@ def upgrade_schema(database_url: str) -> None:
     with engine.begin() as connection:
         for ddl in ddl_statements:
             connection.execute(text(ddl))
+        _backfill_latest_observation_times(connection)
+
+
+def _backfill_latest_observation_times(connection) -> None:
+    element_groups = {
+        "air_temperature_observed_at": ("air_temperature", "air_temperature_unit", ("air_temperature",)),
+        "precipitation_observed_at": (
+            "precipitation_1h",
+            "precipitation_1h_unit",
+            ("sum(precipitation_amount PT1H)", "precipitation_1h"),
+        ),
+        "snow_depth_observed_at": ("snow_depth", "snow_depth_unit", ("snow_depth", "surface_snow_thickness")),
+        "wind_from_direction_observed_at": (
+            "wind_from_direction",
+            "wind_from_direction_unit",
+            ("wind_from_direction",),
+        ),
+        "wind_speed_observed_at": ("wind_speed", "wind_speed_unit", ("wind_speed",)),
+        "discharge_observed_at": ("discharge", "discharge_unit", ("discharge",)),
+        "groundwater_level_observed_at": (
+            "groundwater_level",
+            "groundwater_level_unit",
+            ("groundwater_level",),
+        ),
+    }
+    for column_name, (value_field, unit_field, element_ids) in element_groups.items():
+        placeholders = ", ".join(f":element_{index}" for index in range(len(element_ids)))
+        parameters = {f"element_{index}": element_id for index, element_id in enumerate(element_ids)}
+        backfill_condition = f"{column_name} IS NULL"
+        if column_name == "precipitation_observed_at":
+            backfill_condition += " AND is_precipitation_suspect = 0"
+        latest_row_query = (
+            "SELECT observations.{selected_field} FROM observations "
+            "WHERE observations.station_id = station_latest.station_id "
+            f"AND observations.element_id IN ({placeholders}) "
+            "ORDER BY observations.reference_time DESC, observations.id DESC LIMIT 1"
+        )
+        for target_field, selected_field in (
+            (value_field, "value"),
+            (unit_field, "unit"),
+            (column_name, "reference_time"),
+        ):
+            connection.execute(
+                text(
+                    f"UPDATE station_latest SET {target_field} = ("
+                    f"{latest_row_query.format(selected_field=selected_field)}"
+                    f") WHERE {backfill_condition}"
+                ),
+                parameters,
+            )
 
 
 def _engine_kwargs(database_url: str) -> dict:

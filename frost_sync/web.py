@@ -1585,16 +1585,23 @@ def _compact_latest_properties(
     properties = {
         **_compact_latest_base_properties(station, latest),
         "air_temperature": _air_temperature_value_for_station(station, latest.air_temperature),
+        "air_temperature_observed_at": _isoformat(latest.air_temperature_observed_at),
         "precipitation_1h": None if _station_precipitation_is_excluded(station) else latest.precipitation_1h,
+        "precipitation_observed_at": _isoformat(latest.precipitation_observed_at),
         "is_precipitation_suspect": (latest.is_precipitation_suspect or _station_precipitation_is_excluded(station)) or None,
         "precipitation_3h": None if _station_precipitation_is_excluded(station) else latest.precipitation_3h,
         "precipitation_24h": None if _station_precipitation_is_excluded(station) else latest.precipitation_24h,
         "snow_depth": latest.snow_depth,
+        "snow_depth_observed_at": _isoformat(latest.snow_depth_observed_at),
         "snow_depth_change": latest.snow_depth_change,
         "wind_from_direction": latest.wind_from_direction,
+        "wind_from_direction_observed_at": _isoformat(latest.wind_from_direction_observed_at),
         "wind_speed": latest.wind_speed,
+        "wind_speed_observed_at": _isoformat(latest.wind_speed_observed_at),
         "discharge": latest.discharge,
+        "discharge_observed_at": _isoformat(latest.discharge_observed_at),
         "groundwater_level": latest.groundwater_level,
+        "groundwater_level_observed_at": _isoformat(latest.groundwater_level_observed_at),
         **_discharge_classification_properties(station, latest, discharge_percentile),
     }
     return _without_null_values(properties)
@@ -1630,7 +1637,9 @@ def _load_discharge_percentiles(
 def _discharge_percentile_key(station: Station, latest: StationLatest) -> tuple[int, str] | None:
     if station.provider != "nve_hydapi" or latest.discharge is None:
         return None
-    observed_at = _ensure_utc(latest.observed_at) or datetime.now(timezone.utc)
+    observed_at = _ensure_utc(latest.discharge_observed_at)
+    if observed_at is None:
+        return None
     return station.id, observed_at.strftime("%m-%d")
 
 
@@ -1639,7 +1648,7 @@ def _discharge_classification_properties(
     latest: StationLatest,
     percentile: NveDischargePercentile | None,
 ) -> dict[str, Any]:
-    observed_at = _ensure_utc(latest.observed_at)
+    observed_at = _ensure_utc(latest.discharge_observed_at)
     age_hours = None
     if observed_at is not None:
         age_hours = round((datetime.now(timezone.utc) - observed_at).total_seconds() / 3600, 2)
@@ -1852,6 +1861,7 @@ def _latest_properties(latest: StationLatest) -> dict[str, Any]:
         "observed_at": _isoformat(latest.observed_at),
         "air_temperature": latest.air_temperature,
         "air_temperature_unit": latest.air_temperature_unit,
+        "air_temperature_observed_at": _isoformat(latest.air_temperature_observed_at),
         "air_temperature_min": latest.air_temperature_min,
         "air_temperature_min_unit": latest.air_temperature_min_unit,
         "air_temperature_max": latest.air_temperature_max,
@@ -1859,6 +1869,7 @@ def _latest_properties(latest: StationLatest) -> dict[str, Any]:
         "air_temperature_max_time": latest.air_temperature_max_time,
         "precipitation_1h": latest.precipitation_1h,
         "precipitation_1h_unit": latest.precipitation_1h_unit,
+        "precipitation_observed_at": _isoformat(latest.precipitation_observed_at),
         "is_precipitation_suspect": latest.is_precipitation_suspect,
         "precipitation_1h_max": latest.precipitation_1h_max,
         "precipitation_1h_max_unit": latest.precipitation_1h_max_unit,
@@ -1872,21 +1883,26 @@ def _latest_properties(latest: StationLatest) -> dict[str, Any]:
         "precipitation_24h_unit": latest.precipitation_24h_unit,
         "snow_depth": latest.snow_depth,
         "snow_depth_unit": latest.snow_depth_unit,
+        "snow_depth_observed_at": _isoformat(latest.snow_depth_observed_at),
         "snow_depth_change": latest.snow_depth_change,
         "snow_depth_change_unit": latest.snow_depth_change_unit,
         "wind_from_direction": latest.wind_from_direction,
         "wind_from_direction_unit": latest.wind_from_direction_unit,
+        "wind_from_direction_observed_at": _isoformat(latest.wind_from_direction_observed_at),
         "wind_from_direction_max": latest.wind_from_direction_max,
         "wind_from_direction_max_unit": latest.wind_from_direction_max_unit,
         "wind_speed": latest.wind_speed,
         "wind_speed_unit": latest.wind_speed_unit,
+        "wind_speed_observed_at": _isoformat(latest.wind_speed_observed_at),
         "wind_speed_max": latest.wind_speed_max,
         "wind_speed_max_unit": latest.wind_speed_max_unit,
         "wind_speed_max_time": latest.wind_speed_max_time,
         "discharge": latest.discharge,
         "discharge_unit": latest.discharge_unit,
+        "discharge_observed_at": _isoformat(latest.discharge_observed_at),
         "groundwater_level": latest.groundwater_level,
         "groundwater_level_unit": latest.groundwater_level_unit,
+        "groundwater_level_observed_at": _isoformat(latest.groundwater_level_observed_at),
         "updated_at": _isoformat(latest.updated_at),
     }
 

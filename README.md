@@ -130,11 +130,13 @@ See [docs/nve_discharge_classification.md](docs/nve_discharge_classification.md)
 ### Latest values
 
 - `station_latest` stores one flattened row per station for map display.
-- `observed_at` is the provider's observation/reference time for the newest mapped element in the flattened row. It is shared by the whole row, so individual values such as temperature and snow depth can come from older observation times.
+- `observed_at` is the provider's observation/reference time for the newest mapped element in the flattened row. It is kept as the station-wide latest time for compatibility and general station freshness.
+- Each primary latest value also has its own timestamp: `air_temperature_observed_at`, `precipitation_observed_at`, `snow_depth_observed_at`, `wind_speed_observed_at`, `wind_from_direction_observed_at`, `discharge_observed_at` and `groundwater_level_observed_at`. Use these fields when the age of an individual value matters; parameters on the same station can update at different times.
 - `updated_at` is the UTC time when the local `station_latest` row was last changed or its derived values were recalculated. It describes local processing, not when the station made an observation, and can therefore be later than `observed_at`.
 - `minutes_since_observation` is not stored in the database. It is calculated when the GeoJSON response or cache is built as the number of whole minutes between the current UTC time and `stations.last_observation_time`, which normally matches `observed_at`. It is `null` when no observation time is known.
 - `has_recent_data` is calculated from the same observation time and is `true` when `minutes_since_observation` is at most 120 minutes.
 - API timestamps are returned as ISO 8601 UTC values, for example `2026-08-05T12:00:00Z`.
+- Re-running `init-db` adds missing per-parameter timestamp columns and backfills them from the newest matching rows retained in `observations`. A timestamp remains `null` when no matching history row is available and is populated by a later sync.
 - Capability fields such as `has_air_temperature` and `has_snow_depth` come from `station_capabilities`, not from whether the latest value is non-null.
 - `parameter_profile` is derived from capabilities: `complete` means temperature, precipitation, wind and snow; `weather` means temperature, precipitation and wind; `snow` means snow is available; all other combinations are `lesser`.
 

@@ -38,15 +38,15 @@ EXCLUDED_PRECIPITATION_SOURCE_IDS = {"2.36.0", "SN11000"}
 
 
 ELEMENT_FIELD_MAP = {
-    AIR_TEMPERATURE_ELEMENT: ("air_temperature", "air_temperature_unit"),
-    PRECIPITATION_ELEMENT: ("precipitation_1h", "precipitation_1h_unit"),
-    PRECIPITATION_1H_ELEMENT: ("precipitation_1h", "precipitation_1h_unit"),
-    SNOW_DEPTH_ELEMENT: ("snow_depth", "snow_depth_unit"),
-    SURFACE_SNOW_THICKNESS_ELEMENT: ("snow_depth", "snow_depth_unit"),
-    WIND_DIRECTION_ELEMENT: ("wind_from_direction", "wind_from_direction_unit"),
-    WIND_SPEED_ELEMENT: ("wind_speed", "wind_speed_unit"),
-    DISCHARGE_ELEMENT: ("discharge", "discharge_unit"),
-    GROUNDWATER_LEVEL_ELEMENT: ("groundwater_level", "groundwater_level_unit"),
+    AIR_TEMPERATURE_ELEMENT: ("air_temperature", "air_temperature_unit", "air_temperature_observed_at"),
+    PRECIPITATION_ELEMENT: ("precipitation_1h", "precipitation_1h_unit", "precipitation_observed_at"),
+    PRECIPITATION_1H_ELEMENT: ("precipitation_1h", "precipitation_1h_unit", "precipitation_observed_at"),
+    SNOW_DEPTH_ELEMENT: ("snow_depth", "snow_depth_unit", "snow_depth_observed_at"),
+    SURFACE_SNOW_THICKNESS_ELEMENT: ("snow_depth", "snow_depth_unit", "snow_depth_observed_at"),
+    WIND_DIRECTION_ELEMENT: ("wind_from_direction", "wind_from_direction_unit", "wind_from_direction_observed_at"),
+    WIND_SPEED_ELEMENT: ("wind_speed", "wind_speed_unit", "wind_speed_observed_at"),
+    DISCHARGE_ELEMENT: ("discharge", "discharge_unit", "discharge_observed_at"),
+    GROUNDWATER_LEVEL_ELEMENT: ("groundwater_level", "groundwater_level_unit", "groundwater_level_observed_at"),
 }
 
 NVE_TARGET_ELEMENTS = {
@@ -836,13 +836,14 @@ class SyncService:
                 if element_id in PRECIPITATION_ELEMENT_IDS and (
                     road_station_precipitation_is_suspect or station_precipitation_is_excluded
                 ):
-                    current_time = _ensure_utc(latest.observed_at)
+                    current_time = _ensure_utc(latest.precipitation_observed_at)
                     should_update = current_time is None or reference_time >= current_time
                     if should_update:
                         latest.precipitation_1h = None
                         latest.precipitation_1h_unit = None
                         latest.is_precipitation_suspect = True
-                        latest.observed_at = reference_time
+                        latest.precipitation_observed_at = reference_time
+                        _advance_latest_observed_at(latest, reference_time)
                         has_latest_change = True
                     continue
 
@@ -1082,8 +1083,8 @@ def _apply_latest_observation(latest: StationLatest, reference_time: datetime, i
     if mapped_fields is None:
         return False
 
-    value_field, unit_field = mapped_fields
-    current_time = _ensure_utc(latest.observed_at)
+    value_field, unit_field, observed_at_field = mapped_fields
+    current_time = _ensure_utc(getattr(latest, observed_at_field))
     should_update = current_time is None or reference_time >= current_time
 
     if not should_update:
@@ -1091,8 +1092,15 @@ def _apply_latest_observation(latest: StationLatest, reference_time: datetime, i
 
     setattr(latest, value_field, item.get("value"))
     setattr(latest, unit_field, item.get("unit"))
-    latest.observed_at = reference_time
+    setattr(latest, observed_at_field, reference_time)
+    _advance_latest_observed_at(latest, reference_time)
     return True
+
+
+def _advance_latest_observed_at(latest: StationLatest, reference_time: datetime) -> None:
+    current_time = _ensure_utc(latest.observed_at)
+    if current_time is None or reference_time >= current_time:
+        latest.observed_at = reference_time
 
 
 def _chunked(items: list[str], chunk_size: int) -> Iterable[list[str]]:
