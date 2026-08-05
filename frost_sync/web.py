@@ -127,52 +127,13 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
     @blueprint.get("/api/stations/latest.geojson")
     def latest_geojson() -> Any:
         has_filter = request.args.get("has")
-
-        with session_factory() as session:
-            rows = (
-                session.execute(
-                    select(Station, StationLatest)
-                    .join(StationLatest, StationLatest.station_id == Station.id)
-                    .order_by(Station.source_id)
-            )
-            .all()
-        )
-            capabilities = _load_capabilities(session)
-            discharge_percentiles = _load_discharge_percentiles(session, rows)
-
-        features = []
-        for station, latest in rows:
-            if station.longitude is None or station.latitude is None:
-                continue
-            if _is_suspect_nve_feature(station, latest):
-                continue
-
-            capability_flags = capabilities.get(station.id, {})
-            if has_filter and not _matches_has_filter(has_filter, capability_flags, latest):
-                continue
-
-            features.append(
-                {
-                    "type": "Feature",
-                    "geometry": {
-                        "type": "Point",
-                        "coordinates": [station.longitude, station.latitude],
-                    },
-                    "properties": {
-                        **_station_properties(station),
-                        **capability_flags,
-                        **_parameter_profile_properties(capability_flags),
-                        **_latest_properties_for_station(station, latest),
-                        **_discharge_classification_properties(
-                            station,
-                            latest,
-                            discharge_percentiles.get(_discharge_percentile_key(station, latest)),
-                        ),
-                    },
-                }
-            )
-
-        return jsonify({"type": "FeatureCollection", "features": features})
+        if not has_filter:
+            cached_response = _cached_geojson_response(settings, "latest.geojson")
+            if cached_response is not None:
+                return cached_response
+        response = jsonify(build_latest_geojson(session_factory, has_filter=has_filter))
+        response.headers["X-GeoJSON-Cache"] = "database-fallback"
+        return response
 
     @blueprint.get("/api/stations/latest.compact.geojson")
     def latest_compact_geojson() -> Any:
@@ -418,6 +379,7 @@ def refresh_geojson_cache(settings: Settings | None = None) -> dict[str, Path]:
     settings = settings or load_settings()
     session_factory = create_session_factory(settings.database_url)
     payloads = {
+        "latest.geojson": build_latest_geojson(session_factory),
         "latest.compact.geojson": build_latest_compact_geojson(session_factory),
         "latest.7d.geojson": build_latest_7d_geojson(session_factory),
     }
@@ -437,6 +399,54 @@ def refresh_geojson_cache(settings: Settings | None = None) -> dict[str, Path]:
         tmp_gzip_path.replace(gzip_path)
         written[filename] = path
     return written
+
+
+def build_latest_geojson(session_factory, has_filter: str | None = None) -> dict[str, Any]:
+    with session_factory() as session:
+        rows = (
+            session.execute(
+                select(Station, StationLatest)
+                .join(StationLatest, StationLatest.station_id == Station.id)
+                .order_by(Station.source_id)
+            )
+            .all()
+        )
+        capabilities = _load_capabilities(session)
+        discharge_percentiles = _load_discharge_percentiles(session, rows)
+
+    features = []
+    for station, latest in rows:
+        if station.longitude is None or station.latitude is None:
+            continue
+        if _is_suspect_nve_feature(station, latest):
+            continue
+
+        capability_flags = capabilities.get(station.id, {})
+        if has_filter and not _matches_has_filter(has_filter, capability_flags, latest):
+            continue
+
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [station.longitude, station.latitude],
+                },
+                "properties": {
+                    **_station_properties(station),
+                    **capability_flags,
+                    **_parameter_profile_properties(capability_flags),
+                    **_latest_properties_for_station(station, latest),
+                    **_discharge_classification_properties(
+                        station,
+                        latest,
+                        discharge_percentiles.get(_discharge_percentile_key(station, latest)),
+                    ),
+                },
+            }
+        )
+
+    return {"type": "FeatureCollection", "features": features}
 
 
 def build_latest_compact_geojson(session_factory) -> dict[str, Any]:
