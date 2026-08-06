@@ -543,14 +543,28 @@ def build_latest_fme_geojson(session_factory) -> dict[str, Any]:
     payload = build_latest_geojson(session_factory)
     for feature in payload["features"]:
         properties = feature["properties"]
+        precipitation_1h_max_time = _period_end_time(
+            properties.pop("precipitation_1h_max_period", None)
+        )
+        precipitation_3h_max_time = _period_end_time(
+            properties.pop("precipitation_3h_max_period", None)
+        )
         feature["properties"] = {
             key: value
             for key, value in properties.items()
             if _keep_fme_latest_property(key)
         }
+        feature["properties"]["precipitation_1h_max_time"] = precipitation_1h_max_time
+        feature["properties"]["precipitation_3h_max_time"] = precipitation_3h_max_time
         feature["properties"].setdefault("discharge", None)
         feature["properties"].setdefault("discharge_class", None)
     return payload
+
+
+def _period_end_time(period: str | None) -> str | None:
+    if not period:
+        return None
+    return period.rsplit("/", 1)[-1] or None
 
 
 def _keep_fme_latest_property(key: str) -> bool:
