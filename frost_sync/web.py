@@ -151,6 +151,15 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
         response.headers["X-GeoJSON-Cache"] = "database-fallback"
         return response
 
+    @blueprint.get("/api/stations/latest.fme.geojson")
+    def latest_fme_geojson() -> Any:
+        cached_response = _cached_geojson_response(settings, "latest.fme.geojson")
+        if cached_response is not None:
+            return cached_response
+        response = jsonify(build_latest_fme_geojson(session_factory))
+        response.headers["X-GeoJSON-Cache"] = "database-fallback"
+        return response
+
     @blueprint.get("/api/stations/latest.7d.geojson")
     def latest_7d_geojson() -> Any:
         cached_response = _cached_geojson_response(settings, "latest.7d.geojson")
@@ -243,6 +252,38 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
             "latest": _latest_properties_for_station(station, latest) if latest else None,
         }
         return jsonify(payload)
+
+    @blueprint.get("/api/stations/<source_id>/discharge-thresholds")
+    def station_discharge_thresholds(source_id: str) -> Any:
+        with session_factory() as session:
+            row = (
+                session.execute(
+                    select(Station, NveDischargeFloodThreshold)
+                    .outerjoin(
+                        NveDischargeFloodThreshold,
+                        NveDischargeFloodThreshold.station_id == Station.id,
+                    )
+                    .where(Station.source_id == source_id)
+                )
+                .one_or_none()
+            )
+        if row is None:
+            abort(404, description=f"Station {source_id} was not found")
+        station, threshold = row
+        if station.provider != "nve_hydapi" or threshold is None:
+            abort(404, description=f"No discharge flood thresholds are available for {source_id}")
+        return jsonify(
+            {
+                "source_id": station.source_id,
+                "name": station.name,
+                "discharge_flood_qm": threshold.discharge_qm,
+                "discharge_flood_q5": threshold.discharge_q5,
+                "discharge_flood_q50": threshold.discharge_q50,
+                "discharge_flood_unit": threshold.unit,
+                "discharge_flood_series_version": threshold.series_version,
+                "discharge_flood_updated_at": _isoformat(threshold.updated_at),
+            }
+        )
 
     @blueprint.get("/api/stations/<source_id>/observations")
     def station_observations(source_id: str) -> Any:
@@ -387,6 +428,7 @@ def refresh_geojson_cache(settings: Settings | None = None) -> dict[str, Path]:
     session_factory = create_session_factory(settings.database_url)
     payloads = {
         "latest.geojson": build_latest_geojson(session_factory),
+        "latest.fme.geojson": build_latest_fme_geojson(session_factory),
         "latest.compact.geojson": build_latest_compact_geojson(session_factory),
         "latest.7d.geojson": build_latest_7d_geojson(session_factory),
     }
@@ -495,6 +537,36 @@ def build_latest_compact_geojson(session_factory) -> dict[str, Any]:
         )
 
     return {"type": "FeatureCollection", "features": features}
+
+
+def build_latest_fme_geojson(session_factory) -> dict[str, Any]:
+    payload = build_latest_geojson(session_factory)
+    for feature in payload["features"]:
+        properties = feature["properties"]
+        feature["properties"] = {
+            key: value
+            for key, value in properties.items()
+            if _keep_fme_latest_property(key)
+        }
+        feature["properties"].setdefault("discharge", None)
+        feature["properties"].setdefault("discharge_class", None)
+    return payload
+
+
+def _keep_fme_latest_property(key: str) -> bool:
+    if key.endswith("_unit"):
+        return False
+    if key in {
+        "latitude",
+        "longitude",
+        "valid_to",
+        "parameter_profile",
+        "available_parameter_count",
+    }:
+        return False
+    if key.startswith("discharge_") and key != "discharge_class":
+        return False
+    return True
 
 
 def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
