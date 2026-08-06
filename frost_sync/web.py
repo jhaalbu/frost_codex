@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from flask import Blueprint, Flask, abort, jsonify, request, send_file
 from sqlalchemy import and_, select
@@ -89,11 +90,32 @@ SEVEN_DAY_AGGREGATE_ELEMENT_MAP = {
     "groundwater_level": ["groundwater_level"],
 }
 
+SEVEN_DAY_WIND_DIRECTION_ELEMENT_IDS = {
+    "wind_from_direction",
+    "mean(wind_from_direction PT1H)",
+}
+
 SEVEN_DAY_AGGREGATE_ELEMENT_IDS = {
     element_id
     for element_ids in SEVEN_DAY_AGGREGATE_ELEMENT_MAP.values()
     for element_id in element_ids
+} | SEVEN_DAY_WIND_DIRECTION_ELEMENT_IDS
+
+DAILY_TIMEZONE = ZoneInfo("Europe/Oslo")
+DAILY_AGGREGATE_ELEMENT_MAP = {
+    "air_temperature": ["air_temperature", "mean(air_temperature PT1H)"],
+    "precipitation_1h": ["sum(precipitation_amount PT1H)", "precipitation_1h"],
+    "snow_depth": ["snow_depth", "surface_snow_thickness"],
+    "wind_speed": ["wind_speed", "mean(wind_speed PT1H)"],
+    "wind_gust": ["max(wind_speed_of_gust PT10M)", "max(wind_speed_of_gust PT1H)"],
+    "discharge": ["discharge"],
+    "groundwater_level": ["groundwater_level"],
 }
+DAILY_AGGREGATE_ELEMENT_IDS = {
+    element_id
+    for element_ids in DAILY_AGGREGATE_ELEMENT_MAP.values()
+    for element_id in element_ids
+} | SEVEN_DAY_WIND_DIRECTION_ELEMENT_IDS
 
 EXCLUDED_PRECIPITATION_SOURCE_IDS = {"2.36.0", "SN11000"}
 
@@ -166,6 +188,21 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
         if cached_response is not None:
             return cached_response
         response = jsonify(build_latest_7d_geojson(session_factory))
+        response.headers["X-GeoJSON-Cache"] = "database-fallback"
+        return response
+
+    @blueprint.get("/api/stations/daily.geojson")
+    def daily_geojson() -> Any:
+        date_arg = request.args.get("date")
+        if not date_arg:
+            cached_response = _cached_geojson_response(settings, "daily.geojson")
+            if cached_response is not None:
+                return cached_response
+        try:
+            period_date = date.fromisoformat(date_arg) if date_arg else None
+        except ValueError:
+            abort(400, description="Use ?date=YYYY-MM-DD")
+        response = jsonify(build_daily_geojson(session_factory, period_date=period_date))
         response.headers["X-GeoJSON-Cache"] = "database-fallback"
         return response
 
@@ -431,6 +468,7 @@ def refresh_geojson_cache(settings: Settings | None = None) -> dict[str, Path]:
         "latest.fme.geojson": build_latest_fme_geojson(session_factory),
         "latest.compact.geojson": build_latest_compact_geojson(session_factory),
         "latest.7d.geojson": build_latest_7d_geojson(session_factory),
+        "daily.geojson": build_daily_geojson(session_factory),
     }
 
     cache_dir = _geojson_cache_dir(settings)
@@ -689,6 +727,141 @@ def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
         )
 
     return {"type": "FeatureCollection", "features": features}
+
+
+def build_daily_geojson(
+    session_factory,
+    period_date: date | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    period_date, window_from, window_to = _daily_window(period_date, now=now)
+    history_from = window_from - timedelta(hours=3)
+
+    with session_factory() as session:
+        rows = (
+            session.execute(
+                select(Station, StationLatest)
+                .join(StationLatest, StationLatest.station_id == Station.id)
+                .order_by(Station.source_id)
+            )
+            .all()
+        )
+        observation_rows = (
+            session.execute(
+                select(Observation)
+                .where(
+                    and_(
+                        Observation.reference_time >= history_from,
+                        Observation.reference_time < window_to,
+                        Observation.element_id.in_(DAILY_AGGREGATE_ELEMENT_IDS),
+                    )
+                )
+                .order_by(Observation.station_id, Observation.reference_time)
+            )
+            .scalars()
+            .all()
+        )
+        flood_thresholds = _load_discharge_flood_thresholds(session, rows)
+
+    stations_by_id = {station.id: station for station, _latest in rows}
+    aggregates_by_station = _daily_aggregates_by_station(
+        observation_rows,
+        stations_by_id,
+        window_from=window_from,
+        window_to=window_to,
+    )
+    percentile_keys = {
+        (station.id, _parse_timestamp(discharge_time).strftime("%m-%d"))
+        for station, _latest in rows
+        if station.provider == "nve_hydapi"
+        and (discharge_time := aggregates_by_station.get(station.id, {}).get("discharge_max_time"))
+    }
+    with session_factory() as session:
+        discharge_percentiles = _load_discharge_percentiles_for_keys(session, percentile_keys)
+
+    features = []
+    for station, latest in rows:
+        if station.longitude is None or station.latitude is None:
+            continue
+        if _is_suspect_nve_feature(station, latest):
+            continue
+
+        aggregates = aggregates_by_station.get(station.id, {})
+        discharge_time = aggregates.get("discharge_max_time")
+        percentile_key = (
+            (station.id, _parse_timestamp(discharge_time).strftime("%m-%d"))
+            if station.provider == "nve_hydapi" and discharge_time
+            else None
+        )
+        discharge_classification = _discharge_classification_for_value(
+            station=station,
+            discharge=aggregates.get("discharge_max"),
+            observed_at=_parse_timestamp(discharge_time) if discharge_time else None,
+            percentile=discharge_percentiles.get(percentile_key) if percentile_key else None,
+            flood_threshold=flood_thresholds.get(station.id),
+        )
+        properties = {
+            "daily_id": f"{station.source_id}_{period_date:%Y%m%d}",
+            "source_id": station.source_id,
+            "provider": station.provider,
+            "name": station.name,
+            "stationholder": station.stationholder,
+            "masl": station.masl,
+            "period_date": period_date.isoformat(),
+            "period_start": _isoformat(window_from),
+            "period_end": _isoformat(window_to),
+            "air_temperature_min": aggregates.get("air_temperature_min"),
+            "air_temperature_min_time": aggregates.get("air_temperature_min_time"),
+            "air_temperature_max": aggregates.get("air_temperature_max"),
+            "air_temperature_max_time": aggregates.get("air_temperature_max_time"),
+            "precipitation_24h": aggregates.get("precipitation_24h"),
+            "precipitation_1h_max": aggregates.get("precipitation_1h_max"),
+            "precipitation_1h_max_time": aggregates.get("precipitation_1h_max_time"),
+            "precipitation_3h_max": aggregates.get("precipitation_3h_max"),
+            "precipitation_3h_max_time": aggregates.get("precipitation_3h_max_time"),
+            "wind_speed_max": aggregates.get("wind_speed_max"),
+            "wind_speed_max_time": aggregates.get("wind_speed_max_time"),
+            "wind_direction_at_max": aggregates.get("wind_direction_at_max"),
+            "wind_gust_max": aggregates.get("wind_gust_max"),
+            "wind_gust_max_time": aggregates.get("wind_gust_max_time"),
+            "snow_depth_max": aggregates.get("snow_depth_max"),
+            "snow_depth_max_time": aggregates.get("snow_depth_max_time"),
+            "discharge_max": aggregates.get("discharge_max"),
+            "discharge_max_time": discharge_time,
+            "discharge_class": discharge_classification.get("discharge_class"),
+            "groundwater_level_max": aggregates.get("groundwater_level_max"),
+            "groundwater_level_max_time": aggregates.get("groundwater_level_max_time"),
+        }
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [station.longitude, station.latitude],
+                },
+                "properties": properties,
+            }
+        )
+
+    return {"type": "FeatureCollection", "features": features}
+
+
+def _daily_window(
+    period_date: date | None,
+    now: datetime | None = None,
+) -> tuple[date, datetime, datetime]:
+    if period_date is None:
+        now_utc = _ensure_utc(now or datetime.now(timezone.utc))
+        now_local = now_utc.astimezone(DAILY_TIMEZONE)
+        today_at_six = datetime.combine(now_local.date(), time(6), tzinfo=DAILY_TIMEZONE)
+        end_local = today_at_six if now_local >= today_at_six else datetime.combine(
+            now_local.date() - timedelta(days=1), time(6), tzinfo=DAILY_TIMEZONE
+        )
+        period_date = end_local.date() - timedelta(days=1)
+
+    start_local = datetime.combine(period_date, time(6), tzinfo=DAILY_TIMEZONE)
+    end_local = datetime.combine(period_date + timedelta(days=1), time(6), tzinfo=DAILY_TIMEZONE)
+    return period_date, start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
 
 def _cached_geojson_response(settings: Settings, filename: str) -> Any | None:
@@ -1973,6 +2146,140 @@ def _discharge_age_class(age_hours: float | None) -> str:
     return "stale_over_24h"
 
 
+def _daily_aggregates_by_station(
+    observation_rows: list[Observation],
+    stations_by_id: dict[int, Station],
+    window_from: datetime,
+    window_to: datetime,
+) -> dict[int, dict[str, Any]]:
+    element_to_parameter = {
+        element_id: parameter_id
+        for parameter_id, element_ids in DAILY_AGGREGATE_ELEMENT_MAP.items()
+        for element_id in element_ids
+    }
+    max_rows: dict[tuple[int, str], Observation] = {}
+    min_temperature_rows: dict[int, Observation] = {}
+    wind_direction_rows: dict[tuple[int, datetime], Observation] = {}
+    precipitation_rows: dict[int, list[Observation]] = {}
+    precipitation_totals: dict[int, float] = {}
+
+    for row in observation_rows:
+        if row.value is None:
+            continue
+        row_time = _ensure_utc(row.reference_time)
+        if row_time is None:
+            continue
+        if row.element_id in SEVEN_DAY_WIND_DIRECTION_ELEMENT_IDS:
+            if window_from <= row_time < window_to:
+                wind_direction_rows[(row.station_id, row_time)] = row
+            continue
+
+        parameter_id = element_to_parameter.get(row.element_id)
+        if parameter_id is None:
+            continue
+        station = stations_by_id.get(row.station_id)
+        if parameter_id == "air_temperature" and _is_suspect_road_station_temperature(station, row.value):
+            continue
+        if parameter_id == "precipitation_1h":
+            if _is_precipitation_observation_suspect(station, row.value):
+                continue
+            precipitation_rows.setdefault(row.station_id, []).append(row)
+            if window_from <= row_time < window_to:
+                precipitation_totals[row.station_id] = precipitation_totals.get(row.station_id, 0.0) + row.value
+
+        if not window_from <= row_time < window_to:
+            continue
+        if parameter_id in {"wind_speed", "wind_gust"} and not 0 <= row.value <= 100:
+            continue
+        if parameter_id == "discharge" and row.value < 0:
+            continue
+        if parameter_id == "groundwater_level" and row.value < -100:
+            continue
+
+        if parameter_id == "air_temperature":
+            current_min = min_temperature_rows.get(row.station_id)
+            if current_min is None or row.value < (current_min.value if current_min.value is not None else float("inf")):
+                min_temperature_rows[row.station_id] = row
+        key = (row.station_id, parameter_id)
+        current_max = max_rows.get(key)
+        if current_max is None or row.value > (current_max.value if current_max.value is not None else float("-inf")):
+            max_rows[key] = row
+
+    aggregates: dict[int, dict[str, Any]] = {}
+    for (station_id, parameter_id), row in max_rows.items():
+        values = aggregates.setdefault(station_id, {})
+        values[f"{parameter_id}_max"] = row.value
+        values[f"{parameter_id}_max_time"] = _isoformat(row.reference_time)
+        if parameter_id == "wind_speed":
+            direction = wind_direction_rows.get((station_id, _ensure_utc(row.reference_time)))
+            if direction is not None:
+                values["wind_direction_at_max"] = direction.value
+
+    for station_id, row in min_temperature_rows.items():
+        values = aggregates.setdefault(station_id, {})
+        values["air_temperature_min"] = row.value
+        values["air_temperature_min_time"] = _isoformat(row.reference_time)
+
+    for station_id, total in precipitation_totals.items():
+        aggregates.setdefault(station_id, {})["precipitation_24h"] = round(total, 3)
+
+    for station_id, rows in precipitation_rows.items():
+        in_window_rows = [
+            row for row in rows
+            if (row_time := _ensure_utc(row.reference_time)) is not None
+            and window_from <= row_time < window_to
+        ]
+        if in_window_rows:
+            max_1h = max(in_window_rows, key=lambda row: row.value if row.value is not None else float("-inf"))
+            values = aggregates.setdefault(station_id, {})
+            values["precipitation_1h_max"] = max_1h.value
+            values["precipitation_1h_max_time"] = _isoformat(max_1h.reference_time)
+        max_3h, max_3h_time = _max_rolling_precipitation(
+            rows,
+            hours=3,
+            window_from=window_from,
+            window_to=window_to,
+        )
+        if max_3h is not None and max_3h_time is not None:
+            values = aggregates.setdefault(station_id, {})
+            values["precipitation_3h_max"] = round(max_3h, 3)
+            values["precipitation_3h_max_time"] = _isoformat(max_3h_time)
+
+    return aggregates
+
+
+def _max_rolling_precipitation(
+    rows: list[Observation],
+    hours: int,
+    window_from: datetime,
+    window_to: datetime,
+) -> tuple[float | None, datetime | None]:
+    timed_rows = sorted(
+        (
+            (_ensure_utc(row.reference_time), row.value)
+            for row in rows
+            if row.value is not None and _ensure_utc(row.reference_time) is not None
+        ),
+        key=lambda item: item[0],
+    )
+    start_index = 0
+    rolling_sum = 0.0
+    max_value: float | None = None
+    max_time: datetime | None = None
+    for row_time, value in timed_rows:
+        rolling_sum += value
+        rolling_start = row_time - timedelta(hours=hours)
+        while start_index < len(timed_rows) and timed_rows[start_index][0] <= rolling_start:
+            rolling_sum -= timed_rows[start_index][1]
+            start_index += 1
+        if not window_from <= row_time < window_to:
+            continue
+        if max_value is None or rolling_sum > max_value:
+            max_value = rolling_sum
+            max_time = row_time
+    return max_value, max_time
+
+
 def _seven_day_aggregates_by_station(
     observation_rows: list[Observation],
     stations_by_id: dict[int, Station],
@@ -1986,11 +2293,19 @@ def _seven_day_aggregates_by_station(
     }
     aggregates: dict[int, dict[str, Any]] = {}
     max_rows: dict[tuple[int, str], Observation] = {}
+    min_temperature_rows: dict[int, Observation] = {}
+    wind_direction_rows: dict[tuple[int, datetime], Observation] = {}
     precipitation_totals: dict[int, float] = {}
     precipitation_rows: dict[int, list[Observation]] = {}
 
     for row in observation_rows:
         if row.value is None:
+            continue
+
+        row_time = _ensure_utc(row.reference_time)
+        if row.element_id in SEVEN_DAY_WIND_DIRECTION_ELEMENT_IDS:
+            if row_time is not None and window_from <= row_time <= window_to:
+                wind_direction_rows[(row.station_id, row_time)] = row
             continue
 
         parameter_id = element_to_parameter.get(row.element_id)
@@ -2009,9 +2324,15 @@ def _seven_day_aggregates_by_station(
             if row_time is not None and window_from <= row_time <= window_to:
                 precipitation_totals[row.station_id] = precipitation_totals.get(row.station_id, 0.0) + row.value
 
-        row_time = _ensure_utc(row.reference_time)
         if row_time is None or row_time < window_from or row_time > window_to:
             continue
+
+        if parameter_id == "air_temperature":
+            current_min = min_temperature_rows.get(row.station_id)
+            if current_min is None or row.value < (
+                current_min.value if current_min.value is not None else float("inf")
+            ):
+                min_temperature_rows[row.station_id] = row
 
         key = (row.station_id, parameter_id)
         current = max_rows.get(key)
@@ -2022,6 +2343,17 @@ def _seven_day_aggregates_by_station(
         station_aggregates = aggregates.setdefault(station_id, {})
         station_aggregates[f"{parameter_id}_max_7d"] = row.value
         station_aggregates[f"{parameter_id}_max_7d_time"] = _isoformat(row.reference_time)
+        if parameter_id == "wind_speed":
+            direction_row = wind_direction_rows.get(
+                (station_id, _ensure_utc(row.reference_time))
+            )
+            if direction_row is not None:
+                station_aggregates["wind_direction_at_7dmax"] = direction_row.value
+
+    for station_id, row in min_temperature_rows.items():
+        station_aggregates = aggregates.setdefault(station_id, {})
+        station_aggregates["air_temperature_min_7d"] = row.value
+        station_aggregates["air_temperature_min_7d_time"] = _isoformat(row.reference_time)
 
     for station_id, value in precipitation_totals.items():
         aggregates.setdefault(station_id, {})["precipitation_7d_accumulated"] = round(value, 3)
