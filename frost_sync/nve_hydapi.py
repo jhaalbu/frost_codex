@@ -196,7 +196,7 @@ class NveHydApiClient:
                         "parameter": spec.parameter,
                         "resolutionTime": str(spec.resolution_time),
                         **(
-                            {"versionNumber": str(spec.version_number)}
+                            {"versionNumber": spec.version_number}
                             if spec.version_number is not None
                             else {}
                         ),
@@ -325,7 +325,7 @@ class NveHydApiClient:
                         "resolutionTime": str(spec.resolution_time),
                         "referenceTime": reference_time,
                         **(
-                            {"versionNumber": str(spec.version_number)}
+                            {"versionNumber": spec.version_number}
                             if spec.version_number is not None
                             else {}
                         ),
@@ -378,7 +378,7 @@ class NveHydApiClient:
             raise RuntimeError(f"NVE HydAPI request failed for {path}: {response.text}") from exc
         return response.json()
 
-    def _post(self, path: str, body: list[dict[str, str]]) -> dict[str, Any]:
+    def _post(self, path: str, body: list[dict[str, Any]]) -> dict[str, Any]:
         if path == "/Observations":
             return self._post_with_rate_limit(path, body)
 
@@ -393,7 +393,7 @@ class NveHydApiClient:
             raise RuntimeError(f"NVE HydAPI request failed for {path}: {response.text}") from exc
         return response.json()
 
-    def _post_with_rate_limit(self, path: str, body: list[dict[str, str]]) -> dict[str, Any]:
+    def _post_with_rate_limit(self, path: str, body: list[dict[str, Any]]) -> dict[str, Any]:
         for attempt in range(4):
             now = time.monotonic()
             wait_seconds = 0.22 - (now - self._last_observations_call_at)
