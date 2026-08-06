@@ -559,12 +559,19 @@ def _keep_fme_latest_property(key: str) -> bool:
     if key in {
         "latitude",
         "longitude",
+        "country",
+        "county",
+        "municipality",
+        "last_seen_at",
         "valid_to",
         "parameter_profile",
         "available_parameter_count",
     }:
         return False
-    if key.startswith("discharge_") and key != "discharge_class":
+    if key.startswith("discharge_") and key not in {
+        "discharge_class",
+        "discharge_observed_at",
+    }:
         return False
     return True
 
@@ -1987,6 +1994,7 @@ def _latest_properties_for_station(station: Station, latest: StationLatest) -> d
     if _is_suspect_road_station_temperature(station, latest.air_temperature_min):
         properties["air_temperature_min"] = None
         properties["air_temperature_min_unit"] = None
+        properties["air_temperature_min_time"] = None
     if _is_suspect_road_station_temperature(station, latest.air_temperature_max):
         properties["air_temperature_max"] = None
         properties["air_temperature_max_unit"] = None
@@ -2021,6 +2029,7 @@ def _latest_properties(latest: StationLatest) -> dict[str, Any]:
         "air_temperature_observed_at": _isoformat(latest.air_temperature_observed_at),
         "air_temperature_min": latest.air_temperature_min,
         "air_temperature_min_unit": latest.air_temperature_min_unit,
+        "air_temperature_min_time": latest.air_temperature_min_time,
         "air_temperature_max": latest.air_temperature_max,
         "air_temperature_max_unit": latest.air_temperature_max_unit,
         "air_temperature_max_time": latest.air_temperature_max_time,

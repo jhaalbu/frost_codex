@@ -55,6 +55,7 @@ def upgrade_schema(database_url: str) -> None:
         "air_temperature_observed_at": "DATETIME",
         "air_temperature_min": "FLOAT",
         "air_temperature_min_unit": "VARCHAR(64)",
+        "air_temperature_min_time": "VARCHAR(64)",
         "air_temperature_max": "FLOAT",
         "air_temperature_max_unit": "VARCHAR(64)",
         "air_temperature_max_time": "VARCHAR(64)",

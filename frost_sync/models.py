@@ -115,6 +115,7 @@ class StationLatest(Base):
     air_temperature_observed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     air_temperature_min: Mapped[Optional[float]] = mapped_column(Float)
     air_temperature_min_unit: Mapped[Optional[str]] = mapped_column(String(64))
+    air_temperature_min_time: Mapped[Optional[str]] = mapped_column(String(64))
     air_temperature_max: Mapped[Optional[float]] = mapped_column(Float)
     air_temperature_max_unit: Mapped[Optional[str]] = mapped_column(String(64))
     air_temperature_max_time: Mapped[Optional[str]] = mapped_column(String(64))

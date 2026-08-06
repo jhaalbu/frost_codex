@@ -1132,8 +1132,10 @@ class SyncService:
         latest.precipitation_3h_max_unit = _first_unit(precipitation_rows) if latest.precipitation_3h_max is not None else None
         latest.precipitation_3h_max_period = _window_period(precipitation_3h_max_end, hours=3)
 
-        latest.air_temperature_min = _min_value(temperature_rows)
+        air_temperature_min_row = _min_row(temperature_rows)
+        latest.air_temperature_min = air_temperature_min_row.value if air_temperature_min_row else None
         latest.air_temperature_min_unit = _first_unit(temperature_rows)
+        latest.air_temperature_min_time = _instant_time(air_temperature_min_row)
         air_temperature_max_row = _max_row(temperature_rows)
         latest.air_temperature_max = air_temperature_max_row.value if air_temperature_max_row else None
         latest.air_temperature_max_unit = _first_unit(temperature_rows)
@@ -1352,6 +1354,7 @@ def _reset_window_metrics(latest: StationLatest) -> None:
     latest.precipitation_24h_unit = None
     latest.air_temperature_min = None
     latest.air_temperature_min_unit = None
+    latest.air_temperature_min_time = None
     latest.air_temperature_max = None
     latest.air_temperature_max_unit = None
     latest.air_temperature_max_time = None
@@ -1378,9 +1381,16 @@ def _max_value(rows: list[Observation]) -> float | None:
     return max(values) if values else None
 
 
-def _min_value(rows: list[Observation]) -> float | None:
-    values = [row.value for row in rows if row.value is not None]
-    return min(values) if values else None
+def _min_row(rows: list[Observation]) -> Observation | None:
+    filtered = [row for row in rows if row.value is not None]
+    if not filtered:
+        return None
+    minimum = min(row.value for row in filtered if row.value is not None)
+    return max(
+        (row for row in filtered if row.value == minimum),
+        key=lambda row: _ensure_utc(row.reference_time)
+        or datetime.min.replace(tzinfo=timezone.utc),
+    )
 
 
 def _max_row(rows: list[Observation]) -> Observation | None:
