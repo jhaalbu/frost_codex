@@ -550,7 +550,7 @@ def build_latest_fme_geojson(session_factory) -> dict[str, Any]:
             properties.pop("precipitation_3h_max_period", None)
         )
         feature["properties"] = {
-            key: value
+            key: _fme_property_value(value)
             for key, value in properties.items()
             if _keep_fme_latest_property(key)
         }
@@ -567,6 +567,10 @@ def _period_end_time(period: str | None) -> str | None:
     return period.rsplit("/", 1)[-1] or None
 
 
+def _fme_property_value(value: Any) -> Any:
+    return int(value) if isinstance(value, bool) else value
+
+
 def _keep_fme_latest_property(key: str) -> bool:
     if key.endswith("_unit"):
         return False
@@ -580,6 +584,7 @@ def _keep_fme_latest_property(key: str) -> bool:
         "valid_to",
         "parameter_profile",
         "available_parameter_count",
+        "has_wind_gust_10m",
     }:
         return False
     if key.startswith("discharge_") and key not in {
