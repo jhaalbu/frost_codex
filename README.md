@@ -203,6 +203,7 @@ See [docs/nve_discharge_classification.md](docs/nve_discharge_classification.md)
 - In normal operation, `run-hourly` pre-generates this endpoint as a cache file; the web route only rebuilds it from the database if the cache file is missing.
 - Maximum fields are named like `air_temperature_max_7d`, `snow_depth_max_7d`, `wind_speed_max_7d`, `wind_gust_max_7d`, `discharge_max_7d` and `groundwater_level_max_7d`.
 - Each max field also gets a timestamp field named `*_max_7d_time`.
+- For discharge, the 7-day endpoint keeps only `discharge_max_7d`, `discharge_max_7d_time` and `discharge_class`. The class is calculated from `discharge_max_7d`, using the daily percentiles for `discharge_max_7d_time` and the stored flood thresholds.
 - `precipitation_7d_accumulated` is the sum of accepted hourly precipitation values in the 7-day window.
 - Because this endpoint reads from `observations`, `FROST_RETENTION_DAYS` must be at least 7 if you want complete 7-day values.
 

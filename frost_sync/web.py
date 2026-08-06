@@ -623,11 +623,25 @@ def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
             .scalars()
             .all()
         )
-        discharge_percentiles = _load_discharge_percentiles(session, rows)
         flood_thresholds = _load_discharge_flood_thresholds(session, rows)
 
     stations_by_id = {station.id: station for station, _latest in rows}
     aggregates_by_station = _seven_day_aggregates_by_station(observation_rows, stations_by_id)
+    discharge_percentile_keys = {
+        key
+        for station, _latest in rows
+        if (
+            key := _discharge_7d_percentile_key(
+                station,
+                aggregates_by_station.get(station.id, {}),
+            )
+        ) is not None
+    }
+    with session_factory() as session:
+        discharge_percentiles = _load_discharge_percentiles_for_keys(
+            session,
+            discharge_percentile_keys,
+        )
 
     features = []
     for station, latest in rows:
@@ -640,15 +654,20 @@ def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
         if not aggregates:
             continue
 
+        discharge_max = aggregates.get("discharge_max_7d")
+        discharge_max_time = aggregates.get("discharge_max_7d_time")
+        discharge_key = _discharge_7d_percentile_key(station, aggregates)
+        discharge_classification = _discharge_classification_for_value(
+            station=station,
+            discharge=discharge_max,
+            observed_at=_parse_timestamp(discharge_max_time) if discharge_max_time else None,
+            percentile=discharge_percentiles.get(discharge_key) if discharge_key else None,
+            flood_threshold=flood_thresholds.get(station.id),
+        )
         properties = {
             **_compact_latest_base_properties(station, latest),
             **aggregates,
-            **_discharge_classification_properties(
-                station,
-                latest,
-                discharge_percentiles.get(_discharge_percentile_key(station, latest)),
-                flood_thresholds.get(station.id),
-            ),
+            "discharge_class": discharge_classification.get("discharge_class"),
         }
 
         features.append(
@@ -1741,6 +1760,16 @@ def _load_discharge_percentiles(
     if not keys:
         return {}
 
+    return _load_discharge_percentiles_for_keys(session, keys)
+
+
+def _load_discharge_percentiles_for_keys(
+    session,
+    keys: set[tuple[int, str]],
+) -> dict[tuple[int, str], NveDischargePercentile]:
+    if not keys:
+        return {}
+
     station_ids = {station_id for station_id, _date_mmdd in keys}
     date_mmdds = {date_mmdd for _station_id, date_mmdd in keys}
     percentile_rows = (
@@ -1784,6 +1813,18 @@ def _discharge_percentile_key(station: Station, latest: StationLatest) -> tuple[
     return station.id, observed_at.strftime("%m-%d")
 
 
+def _discharge_7d_percentile_key(
+    station: Station,
+    aggregates: dict[str, Any],
+) -> tuple[int, str] | None:
+    if station.provider != "nve_hydapi" or aggregates.get("discharge_max_7d") is None:
+        return None
+    observed_at = aggregates.get("discharge_max_7d_time")
+    if not observed_at:
+        return None
+    return station.id, _parse_timestamp(observed_at).strftime("%m-%d")
+
+
 def _discharge_classification_properties(
     station: Station,
     latest: StationLatest,
@@ -1791,11 +1832,28 @@ def _discharge_classification_properties(
     flood_threshold: NveDischargeFloodThreshold | None = None,
 ) -> dict[str, Any]:
     observed_at = _ensure_utc(latest.discharge_observed_at)
+    return _discharge_classification_for_value(
+        station=station,
+        discharge=latest.discharge,
+        observed_at=observed_at,
+        percentile=percentile,
+        flood_threshold=flood_threshold,
+    )
+
+
+def _discharge_classification_for_value(
+    station: Station,
+    discharge: float | None,
+    observed_at: datetime | None,
+    percentile: NveDischargePercentile | None,
+    flood_threshold: NveDischargeFloodThreshold | None = None,
+) -> dict[str, Any]:
+    observed_at = _ensure_utc(observed_at)
     age_hours = None
     if observed_at is not None:
         age_hours = round((datetime.now(timezone.utc) - observed_at).total_seconds() / 3600, 2)
 
-    if latest.discharge is None and station.provider != "nve_hydapi":
+    if discharge is None and station.provider != "nve_hydapi":
         return {}
 
     base = {
@@ -1809,7 +1867,7 @@ def _discharge_classification_properties(
         "discharge_flood_series_version": flood_threshold.series_version if flood_threshold else None,
         "discharge_flood_updated_at": _isoformat(flood_threshold.updated_at) if flood_threshold else None,
     }
-    if latest.discharge is None:
+    if discharge is None:
         return {
             **base,
             "discharge_class": "missing_value",
@@ -1821,7 +1879,7 @@ def _discharge_classification_properties(
 
     if station.provider == "nve_hydapi" and flood_threshold is not None:
         flood_classification = _classify_discharge_by_flood_threshold(
-            latest.discharge,
+            discharge,
             flood_threshold,
         )
         if flood_classification is not None:
@@ -1845,7 +1903,7 @@ def _discharge_classification_properties(
             "discharge_classification_missing": True,
         }
 
-    discharge_class, rank = _classify_discharge_by_percentile(latest.discharge, percentile)
+    discharge_class, rank = _classify_discharge_by_percentile(discharge, percentile)
     classification_missing = discharge_class == "missing_classification"
     return {
         **base,
