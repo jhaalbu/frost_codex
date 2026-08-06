@@ -669,6 +669,7 @@ def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
             **aggregates,
             "discharge_class": discharge_classification.get("discharge_class"),
         }
+        properties.pop("has_recent_data", None)
 
         features.append(
             {
