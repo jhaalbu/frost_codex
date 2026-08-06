@@ -206,6 +206,7 @@ See [docs/nve_discharge_classification.md](docs/nve_discharge_classification.md)
 - For discharge, the 7-day endpoint keeps only `discharge_max_7d`, `discharge_max_7d_time` and `discharge_class`. The class is calculated from `discharge_max_7d`, using the daily percentiles for `discharge_max_7d_time` and the stored flood thresholds.
 - `latest.7d.geojson` omits `has_recent_data`; `minutes_since_observation` remains available.
 - `precipitation_7d_accumulated` is the sum of accepted hourly precipitation values in the 7-day window.
+- `precipitation_24h_max` is the largest rolling 24-hour precipitation sum whose end time falls within the 7-day window, and `precipitation_24h_max_time` is that end time. The calculation reads an extra 24 hours before the 7-day window so the first rolling windows are complete; that lookback is not included in `precipitation_7d_accumulated` or other 7-day maxima.
 - Because this endpoint reads from `observations`, `FROST_RETENTION_DAYS` must be at least 7 if you want complete 7-day values.
 
 ### Compact GeoJSON method

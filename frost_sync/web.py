@@ -598,6 +598,7 @@ def _keep_fme_latest_property(key: str) -> bool:
 def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
     window_to = datetime.now(timezone.utc)
     window_from = window_to - timedelta(days=7)
+    history_from = window_from - timedelta(hours=24)
 
     with session_factory() as session:
         rows = (
@@ -613,7 +614,7 @@ def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
                 select(Observation)
                 .where(
                     and_(
-                        Observation.reference_time >= window_from,
+                        Observation.reference_time >= history_from,
                         Observation.reference_time <= window_to,
                         Observation.element_id.in_(SEVEN_DAY_AGGREGATE_ELEMENT_IDS),
                     )
@@ -626,7 +627,12 @@ def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
         flood_thresholds = _load_discharge_flood_thresholds(session, rows)
 
     stations_by_id = {station.id: station for station, _latest in rows}
-    aggregates_by_station = _seven_day_aggregates_by_station(observation_rows, stations_by_id)
+    aggregates_by_station = _seven_day_aggregates_by_station(
+        observation_rows,
+        stations_by_id,
+        window_from=window_from,
+        window_to=window_to,
+    )
     discharge_percentile_keys = {
         key
         for station, _latest in rows
@@ -1970,6 +1976,8 @@ def _discharge_age_class(age_hours: float | None) -> str:
 def _seven_day_aggregates_by_station(
     observation_rows: list[Observation],
     stations_by_id: dict[int, Station],
+    window_from: datetime,
+    window_to: datetime,
 ) -> dict[int, dict[str, Any]]:
     element_to_parameter = {
         element_id: parameter_id
@@ -1979,6 +1987,7 @@ def _seven_day_aggregates_by_station(
     aggregates: dict[int, dict[str, Any]] = {}
     max_rows: dict[tuple[int, str], Observation] = {}
     precipitation_totals: dict[int, float] = {}
+    precipitation_rows: dict[int, list[Observation]] = {}
 
     for row in observation_rows:
         if row.value is None:
@@ -1995,7 +2004,14 @@ def _seven_day_aggregates_by_station(
         if parameter_id == "precipitation_1h":
             if _is_precipitation_observation_suspect(station, row.value):
                 continue
-            precipitation_totals[row.station_id] = precipitation_totals.get(row.station_id, 0.0) + row.value
+            precipitation_rows.setdefault(row.station_id, []).append(row)
+            row_time = _ensure_utc(row.reference_time)
+            if row_time is not None and window_from <= row_time <= window_to:
+                precipitation_totals[row.station_id] = precipitation_totals.get(row.station_id, 0.0) + row.value
+
+        row_time = _ensure_utc(row.reference_time)
+        if row_time is None or row_time < window_from or row_time > window_to:
+            continue
 
         key = (row.station_id, parameter_id)
         current = max_rows.get(key)
@@ -2010,7 +2026,50 @@ def _seven_day_aggregates_by_station(
     for station_id, value in precipitation_totals.items():
         aggregates.setdefault(station_id, {})["precipitation_7d_accumulated"] = round(value, 3)
 
+    for station_id, rows in precipitation_rows.items():
+        max_value, max_time = _max_rolling_precipitation_24h(
+            rows,
+            window_from=window_from,
+            window_to=window_to,
+        )
+        if max_value is None or max_time is None:
+            continue
+        station_aggregates = aggregates.setdefault(station_id, {})
+        station_aggregates["precipitation_24h_max"] = round(max_value, 3)
+        station_aggregates["precipitation_24h_max_time"] = _isoformat(max_time)
+
     return aggregates
+
+
+def _max_rolling_precipitation_24h(
+    rows: list[Observation],
+    window_from: datetime,
+    window_to: datetime,
+) -> tuple[float | None, datetime | None]:
+    timed_rows = sorted(
+        (
+            (_ensure_utc(row.reference_time), row.value)
+            for row in rows
+            if row.value is not None and _ensure_utc(row.reference_time) is not None
+        ),
+        key=lambda item: item[0],
+    )
+    start_index = 0
+    rolling_sum = 0.0
+    max_value: float | None = None
+    max_time: datetime | None = None
+    for row_time, value in timed_rows:
+        rolling_sum += value
+        rolling_start = row_time - timedelta(hours=24)
+        while start_index < len(timed_rows) and timed_rows[start_index][0] <= rolling_start:
+            rolling_sum -= timed_rows[start_index][1]
+            start_index += 1
+        if row_time < window_from or row_time > window_to:
+            continue
+        if max_value is None or rolling_sum > max_value:
+            max_value = rolling_sum
+            max_time = row_time
+    return max_value, max_time
 
 
 def _is_precipitation_observation_suspect(station: Station | None, value: float | None) -> bool:
