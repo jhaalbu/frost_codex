@@ -118,6 +118,7 @@ The response is intentionally simple:
 - `station` contains `provider`, `source_id`, `stationholder`, `name` and `masl`
 - `series` is an object keyed by parameter name
 - each parameter contains `parameter`, `unit` and `data`
+- `series.discharge` also includes `thresholds` with `qm`, `q5`, `q50`, `unit`, `series_version` and `updated_at` when stored NVE flood thresholds are available
 - each `data` point contains `time`, `timestamp`, `value` and `quality_code`
 
 ## Data methods and filters

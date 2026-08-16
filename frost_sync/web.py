@@ -400,6 +400,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                 .all()
             )
             stations_by_source = {station.source_id: station for station in stations}
+            discharge_thresholds = _load_discharge_flood_thresholds_for_stations(session, stations)
 
         station_payloads, errors = _build_timeseries_payloads_for_stations(
             stations=[station for source_id in source_ids if (station := stations_by_source.get(source_id)) is not None],
@@ -409,6 +410,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
             frost_client=frost_client,
             nve_hydapi_client=nve_hydapi_client,
             snower_client=snower_client,
+            discharge_thresholds=discharge_thresholds,
         )
 
         return jsonify(
@@ -434,6 +436,14 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
             )
             if station is None:
                 abort(404)
+            threshold = (
+                session.execute(
+                    select(NveDischargeFloodThreshold).where(
+                        NveDischargeFloodThreshold.station_id == station.id
+                    )
+                )
+                .scalar_one_or_none()
+            )
 
         try:
             payload = _build_timeseries_payload_for_station(
@@ -444,6 +454,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                 frost_client=frost_client,
                 nve_hydapi_client=nve_hydapi_client,
                 snower_client=snower_client,
+                discharge_threshold=threshold,
             )
         except RuntimeError as exc:
             abort(502, description=str(exc))
@@ -988,6 +999,7 @@ def _build_timeseries_payload_for_station(
     frost_client: FrostClient | None,
     nve_hydapi_client: NveHydApiClient | None,
     snower_client: SnowerClient | None,
+    discharge_threshold: NveDischargeFloodThreshold | None = None,
 ) -> dict[str, Any]:
     normalized_rows = _fetch_timeseries_rows_for_station(
         station=station,
@@ -1007,6 +1019,7 @@ def _build_timeseries_payload_for_station(
                 from_dt=from_dt,
                 to_dt=to_dt,
                 provider=station.provider,
+                discharge_threshold=discharge_threshold,
             )
             for parameter_id in parameter_ids
         },
@@ -1021,6 +1034,7 @@ def _build_timeseries_payloads_for_stations(
     frost_client: FrostClient | None,
     nve_hydapi_client: NveHydApiClient | None,
     snower_client: SnowerClient | None,
+    discharge_thresholds: dict[int, NveDischargeFloodThreshold] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     rows_by_source: dict[str, list[dict[str, Any]]] = {station.source_id: [] for station in stations}
     errors: list[dict[str, str]] = []
@@ -1090,6 +1104,11 @@ def _build_timeseries_payloads_for_stations(
             rows=rows_by_source.get(station.source_id, []),
             from_dt=from_dt,
             to_dt=to_dt,
+            discharge_threshold=(
+                discharge_thresholds.get(station.id)
+                if discharge_thresholds is not None
+                else None
+            ),
         )
         for station in stations
         if not any(error["source_id"] == station.source_id for error in errors)
@@ -1103,6 +1122,7 @@ def _build_timeseries_payload_from_rows(
     rows: list[dict[str, Any]],
     from_dt: datetime,
     to_dt: datetime,
+    discharge_threshold: NveDischargeFloodThreshold | None = None,
 ) -> dict[str, Any]:
     return {
         "station": _timeseries_station_properties(station),
@@ -1113,6 +1133,7 @@ def _build_timeseries_payload_from_rows(
                 from_dt=from_dt,
                 to_dt=to_dt,
                 provider=station.provider,
+                discharge_threshold=discharge_threshold,
             )
             for parameter_id in parameter_ids
         },
@@ -1297,6 +1318,7 @@ def _build_direct_series_payload(
     from_dt: datetime,
     to_dt: datetime,
     provider: str,
+    discharge_threshold: NveDischargeFloodThreshold | None = None,
 ) -> dict[str, Any]:
     definition = PARAMETER_DEFINITIONS[parameter_id]
     if parameter_id == "precipitation_24h_rolling":
@@ -1305,11 +1327,14 @@ def _build_direct_series_payload(
         points = _build_precipitation_accumulated_points(rows, from_dt, to_dt)
     else:
         points = _build_series_points(parameter_id, definition, rows, from_dt, to_dt, provider)
-    return {
+    payload = {
         "parameter": parameter_id,
         "unit": _series_unit(parameter_id, rows) or definition["unit"],
         "data": [_format_timeseries_point(point) for point in points],
     }
+    if parameter_id == "discharge":
+        payload["thresholds"] = _timeseries_discharge_thresholds_payload(discharge_threshold)
+    return payload
 
 
 def _build_series_points(
@@ -1982,6 +2007,40 @@ def _load_discharge_flood_thresholds(
         )
     ).scalars().all()
     return {row.station_id: row for row in threshold_rows}
+
+
+def _load_discharge_flood_thresholds_for_stations(
+    session,
+    stations: list[Station],
+) -> dict[int, NveDischargeFloodThreshold]:
+    station_ids = {
+        station.id
+        for station in stations
+        if station.provider == "nve_hydapi"
+    }
+    if not station_ids:
+        return {}
+    threshold_rows = session.execute(
+        select(NveDischargeFloodThreshold).where(
+            NveDischargeFloodThreshold.station_id.in_(station_ids)
+        )
+    ).scalars().all()
+    return {row.station_id: row for row in threshold_rows}
+
+
+def _timeseries_discharge_thresholds_payload(
+    threshold: NveDischargeFloodThreshold | None,
+) -> dict[str, Any] | None:
+    if threshold is None:
+        return None
+    return {
+        "qm": threshold.discharge_qm,
+        "q5": threshold.discharge_q5,
+        "q50": threshold.discharge_q50,
+        "unit": threshold.unit,
+        "series_version": threshold.series_version,
+        "updated_at": _isoformat(threshold.updated_at),
+    }
 
 
 def _discharge_percentile_key(station: Station, latest: StationLatest) -> tuple[int, str] | None:
