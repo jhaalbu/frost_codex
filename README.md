@@ -174,6 +174,8 @@ See [docs/nve_discharge_classification.md](docs/nve_discharge_classification.md)
 ### Temperature filters
 
 - For SVV/Statens vegvesen stations, air temperature values from `-40.5` to `-39.5` are treated as sensor/error codes and omitted from latest values and derived temperature aggregates.
+- Air temperature values close to `0` are omitted from `station_latest` when neighbouring values in the surrounding 6 hours are consistently at least `5` degrees away from zero on the same side, or when the surrounding 24-hour pattern is dominated by exact zero values while several same-side non-zero values are far from zero. This removes isolated and repeated sensor dropouts without filtering normal freezing-point weather.
+- If the newest raw air temperature value is filtered as suspect, `latest.air_temperature` is set to `null` instead of falling back to an older valid temperature.
 
 ### Discharge classification
 

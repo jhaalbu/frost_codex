@@ -1077,13 +1077,14 @@ class SyncService:
             [row for row in rows if row.element_id in PRECIPITATION_ELEMENT_IDS and row.value is not None],
             key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
         )
-        temperature_rows = [
+        raw_temperature_rows = [
             row
             for row in rows
             if row.element_id == AIR_TEMPERATURE_ELEMENT
             and row.value is not None
             and not _is_suspect_road_station_temperature(station, row.value)
         ]
+        temperature_rows = _filter_suspect_air_temperature_rows(station, raw_temperature_rows)
         snow_depth_rows = sorted(
             [row for row in rows if row.element_id in SNOW_DEPTH_ELEMENT_IDS and row.value is not None],
             key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
@@ -1140,6 +1141,20 @@ class SyncService:
         latest.air_temperature_max = air_temperature_max_row.value if air_temperature_max_row else None
         latest.air_temperature_max_unit = _first_unit(temperature_rows)
         latest.air_temperature_max_time = _instant_time(air_temperature_max_row)
+        raw_latest_air_temperature_row = _latest_row(raw_temperature_rows)
+        latest_air_temperature_row = _latest_row(temperature_rows)
+        if raw_latest_air_temperature_row is not None and raw_latest_air_temperature_row is latest_air_temperature_row:
+            latest.air_temperature = latest_air_temperature_row.value
+            latest.air_temperature_unit = latest_air_temperature_row.unit
+            latest.air_temperature_observed_at = _ensure_utc(latest_air_temperature_row.reference_time)
+        else:
+            latest.air_temperature = None
+            latest.air_temperature_unit = None
+            latest.air_temperature_observed_at = (
+                _ensure_utc(raw_latest_air_temperature_row.reference_time)
+                if raw_latest_air_temperature_row
+                else None
+            )
 
         latest_snow_row = snow_depth_rows[-1] if snow_depth_rows else None
         latest.snow_depth = latest_snow_row.value if latest_snow_row else None
@@ -1342,6 +1357,95 @@ def _filter_suspect_road_station_precipitation(
     return filtered
 
 
+def _filter_suspect_air_temperature_rows(
+    station: Station,
+    temperature_rows: list[Observation],
+) -> list[Observation]:
+    sorted_rows = sorted(
+        temperature_rows,
+        key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    return [
+        row
+        for row in sorted_rows
+        if not (
+            _is_suspect_zero_air_temperature(row, sorted_rows)
+            or _is_suspect_zero_air_temperature_pattern(row, sorted_rows)
+        )
+    ]
+
+
+def _is_suspect_zero_air_temperature(
+    row: Observation,
+    temperature_rows: list[Observation],
+) -> bool:
+    if row.value is None or abs(row.value) > 0.05:
+        return False
+
+    row_time = _ensure_utc(row.reference_time)
+    if row_time is None:
+        return False
+
+    neighbours = [
+        candidate.value
+        for candidate in temperature_rows
+        if candidate.value is not None
+        and candidate is not row
+        and abs(candidate.value) > 1.0
+        and (candidate_time := _ensure_utc(candidate.reference_time)) is not None
+        and abs((candidate_time - row_time).total_seconds()) <= 6 * 3600
+    ]
+    if len(neighbours) < 2:
+        return False
+
+    positive_neighbours = [value for value in neighbours if value > 0]
+    negative_neighbours = [value for value in neighbours if value < 0]
+    same_side_neighbours = positive_neighbours if len(positive_neighbours) >= len(negative_neighbours) else negative_neighbours
+    if len(same_side_neighbours) < 2:
+        return False
+
+    return _median_abs_value(same_side_neighbours) >= 5.0
+
+
+def _is_suspect_zero_air_temperature_pattern(
+    row: Observation,
+    temperature_rows: list[Observation],
+) -> bool:
+    if row.value is None or abs(row.value) > 0.05:
+        return False
+
+    row_time = _ensure_utc(row.reference_time)
+    if row_time is None:
+        return False
+
+    window_rows = [
+        candidate
+        for candidate in temperature_rows
+        if candidate.value is not None
+        and (candidate_time := _ensure_utc(candidate.reference_time)) is not None
+        and abs((candidate_time - row_time).total_seconds()) <= 24 * 3600
+    ]
+    if len(window_rows) < 6:
+        return False
+
+    zero_count = sum(1 for candidate in window_rows if candidate.value is not None and abs(candidate.value) <= 0.05)
+    if zero_count < 6 or zero_count / len(window_rows) < 0.5:
+        return False
+
+    non_zero_values = [
+        candidate.value
+        for candidate in window_rows
+        if candidate.value is not None and abs(candidate.value) > 1.0
+    ]
+    positive_values = [value for value in non_zero_values if value > 0]
+    negative_values = [value for value in non_zero_values if value < 0]
+    same_side_values = positive_values if len(positive_values) >= len(negative_values) else negative_values
+    if len(same_side_values) < 2:
+        return False
+
+    return _median_abs_value(same_side_values) >= 5.0
+
+
 def _reset_window_metrics(latest: StationLatest) -> None:
     latest.is_precipitation_suspect = False
     latest.precipitation_1h_max = None
@@ -1404,6 +1508,29 @@ def _max_row(rows: list[Observation]) -> Observation | None:
             _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
         ),
     )
+
+
+def _latest_row(rows: list[Observation]) -> Observation | None:
+    filtered = [
+        row
+        for row in rows
+        if _ensure_utc(row.reference_time) is not None
+    ]
+    if not filtered:
+        return None
+    return max(
+        filtered,
+        key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
+    )
+
+
+def _median_abs_value(values: list[float]) -> float:
+    sorted_values = sorted(abs(value) for value in values)
+    count = len(sorted_values)
+    midpoint = count // 2
+    if count % 2:
+        return sorted_values[midpoint]
+    return (sorted_values[midpoint - 1] + sorted_values[midpoint]) / 2
 
 
 def _rolling_sum_for_window(rows: list[Observation], window_end: datetime, hours: int) -> float | None:
