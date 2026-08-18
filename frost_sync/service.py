@@ -1371,6 +1371,7 @@ def _filter_suspect_air_temperature_rows(
         if not (
             _is_suspect_zero_air_temperature(row, sorted_rows)
             or _is_suspect_zero_air_temperature_pattern(row, sorted_rows)
+            or _is_suspect_recent_zero_air_temperature_run(row, sorted_rows)
         )
     ]
 
@@ -1444,6 +1445,31 @@ def _is_suspect_zero_air_temperature_pattern(
         return False
 
     return _median_abs_value(same_side_values) >= 5.0
+
+
+def _is_suspect_recent_zero_air_temperature_run(
+    row: Observation,
+    temperature_rows: list[Observation],
+) -> bool:
+    if row.value is None or abs(row.value) > 0.05:
+        return False
+
+    row_time = _ensure_utc(row.reference_time)
+    if row_time is None:
+        return False
+
+    window_start = row_time - timedelta(hours=6)
+    window_rows = [
+        candidate
+        for candidate in temperature_rows
+        if candidate.value is not None
+        and (candidate_time := _ensure_utc(candidate.reference_time)) is not None
+        and window_start <= candidate_time <= row_time
+    ]
+    if len(window_rows) < 3:
+        return False
+
+    return all(candidate.value is not None and abs(candidate.value) <= 0.05 for candidate in window_rows)
 
 
 def _reset_window_metrics(latest: StationLatest) -> None:
