@@ -401,6 +401,11 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
             )
             stations_by_source = {station.source_id: station for station in stations}
             discharge_thresholds = _load_discharge_flood_thresholds_for_stations(session, stations)
+            discharge_percentiles = (
+                _load_discharge_percentiles_for_stations(session, stations, from_dt, to_dt)
+                if "discharge" in parameter_ids
+                else {}
+            )
 
         station_payloads, errors = _build_timeseries_payloads_for_stations(
             stations=[station for source_id in source_ids if (station := stations_by_source.get(source_id)) is not None],
@@ -411,6 +416,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
             nve_hydapi_client=nve_hydapi_client,
             snower_client=snower_client,
             discharge_thresholds=discharge_thresholds,
+            discharge_percentiles=discharge_percentiles,
         )
 
         return jsonify(
@@ -444,6 +450,11 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                 )
                 .scalar_one_or_none()
             )
+            percentiles = (
+                _load_discharge_percentiles_for_stations(session, [station], from_dt, to_dt)
+                if "discharge" in parameter_ids
+                else {}
+            )
 
         try:
             payload = _build_timeseries_payload_for_station(
@@ -455,6 +466,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                 nve_hydapi_client=nve_hydapi_client,
                 snower_client=snower_client,
                 discharge_threshold=threshold,
+                discharge_percentiles=percentiles.get(station.id, []),
             )
         except RuntimeError as exc:
             abort(502, description=str(exc))
@@ -1000,6 +1012,7 @@ def _build_timeseries_payload_for_station(
     nve_hydapi_client: NveHydApiClient | None,
     snower_client: SnowerClient | None,
     discharge_threshold: NveDischargeFloodThreshold | None = None,
+    discharge_percentiles: list[NveDischargePercentile] | None = None,
 ) -> dict[str, Any]:
     normalized_rows = _fetch_timeseries_rows_for_station(
         station=station,
@@ -1020,6 +1033,7 @@ def _build_timeseries_payload_for_station(
                 to_dt=to_dt,
                 provider=station.provider,
                 discharge_threshold=discharge_threshold,
+                discharge_percentiles=discharge_percentiles,
             )
             for parameter_id in parameter_ids
         },
@@ -1035,6 +1049,7 @@ def _build_timeseries_payloads_for_stations(
     nve_hydapi_client: NveHydApiClient | None,
     snower_client: SnowerClient | None,
     discharge_thresholds: dict[int, NveDischargeFloodThreshold] | None = None,
+    discharge_percentiles: dict[int, list[NveDischargePercentile]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     rows_by_source: dict[str, list[dict[str, Any]]] = {station.source_id: [] for station in stations}
     errors: list[dict[str, str]] = []
@@ -1109,6 +1124,11 @@ def _build_timeseries_payloads_for_stations(
                 if discharge_thresholds is not None
                 else None
             ),
+            discharge_percentiles=(
+                discharge_percentiles.get(station.id)
+                if discharge_percentiles is not None
+                else None
+            ),
         )
         for station in stations
         if not any(error["source_id"] == station.source_id for error in errors)
@@ -1123,6 +1143,7 @@ def _build_timeseries_payload_from_rows(
     from_dt: datetime,
     to_dt: datetime,
     discharge_threshold: NveDischargeFloodThreshold | None = None,
+    discharge_percentiles: list[NveDischargePercentile] | None = None,
 ) -> dict[str, Any]:
     return {
         "station": _timeseries_station_properties(station),
@@ -1134,6 +1155,7 @@ def _build_timeseries_payload_from_rows(
                 to_dt=to_dt,
                 provider=station.provider,
                 discharge_threshold=discharge_threshold,
+                discharge_percentiles=discharge_percentiles,
             )
             for parameter_id in parameter_ids
         },
@@ -1319,6 +1341,7 @@ def _build_direct_series_payload(
     to_dt: datetime,
     provider: str,
     discharge_threshold: NveDischargeFloodThreshold | None = None,
+    discharge_percentiles: list[NveDischargePercentile] | None = None,
 ) -> dict[str, Any]:
     definition = PARAMETER_DEFINITIONS[parameter_id]
     if parameter_id == "precipitation_24h_rolling":
@@ -1334,6 +1357,7 @@ def _build_direct_series_payload(
     }
     if parameter_id == "discharge":
         payload["thresholds"] = _timeseries_discharge_thresholds_payload(discharge_threshold)
+        payload["percentiles"] = _timeseries_discharge_percentiles_payload(discharge_percentiles or [])
     return payload
 
 
@@ -2028,6 +2052,64 @@ def _load_discharge_flood_thresholds_for_stations(
     return {row.station_id: row for row in threshold_rows}
 
 
+def _load_discharge_percentiles_for_stations(
+    session,
+    stations: list[Station],
+    from_dt: datetime,
+    to_dt: datetime,
+) -> dict[int, list[NveDischargePercentile]]:
+    station_ids = {
+        station.id
+        for station in stations
+        if station.provider == "nve_hydapi"
+    }
+    if not station_ids:
+        return {}
+
+    date_mmdds = _date_mmdds_for_range(from_dt, to_dt)
+    if not date_mmdds:
+        return {}
+
+    rows = (
+        session.execute(
+            select(NveDischargePercentile).where(
+                NveDischargePercentile.station_id.in_(station_ids),
+                NveDischargePercentile.date_mmdd.in_(date_mmdds),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    rows_by_station: dict[int, list[NveDischargePercentile]] = {}
+    order = {date_mmdd: index for index, date_mmdd in enumerate(date_mmdds)}
+    for row in rows:
+        rows_by_station.setdefault(row.station_id, []).append(row)
+    for station_rows in rows_by_station.values():
+        station_rows.sort(key=lambda row: order.get(row.date_mmdd, 999))
+    return rows_by_station
+
+
+def _date_mmdds_for_range(from_dt: datetime, to_dt: datetime) -> list[str]:
+    start = _ensure_utc(from_dt)
+    end = _ensure_utc(to_dt)
+    if start is None or end is None:
+        return []
+    if end < start:
+        start, end = end, start
+
+    values: list[str] = []
+    seen: set[str] = set()
+    current = start.date()
+    end_date = end.date()
+    while current <= end_date:
+        date_mmdd = current.strftime("%m-%d")
+        if date_mmdd not in seen:
+            values.append(date_mmdd)
+            seen.add(date_mmdd)
+        current += timedelta(days=1)
+    return values
+
+
 def _timeseries_discharge_thresholds_payload(
     threshold: NveDischargeFloodThreshold | None,
 ) -> dict[str, Any] | None:
@@ -2041,6 +2123,23 @@ def _timeseries_discharge_thresholds_payload(
         "series_version": threshold.series_version,
         "updated_at": _isoformat(threshold.updated_at),
     }
+
+
+def _timeseries_discharge_percentiles_payload(
+    percentiles: list[NveDischargePercentile],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "date": row.date_mmdd,
+            "mean": row.mean_value,
+            "perc25": row.perc25,
+            "perc60": row.perc60,
+            "perc75": row.perc75,
+            "perc90": row.perc90,
+            "perc95": row.perc95,
+        }
+        for row in percentiles
+    ]
 
 
 def _discharge_percentile_key(station: Station, latest: StationLatest) -> tuple[int, str] | None:
