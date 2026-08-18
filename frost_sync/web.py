@@ -1012,7 +1012,7 @@ def _build_timeseries_payload_for_station(
     nve_hydapi_client: NveHydApiClient | None,
     snower_client: SnowerClient | None,
     discharge_threshold: NveDischargeFloodThreshold | None = None,
-    discharge_percentiles: list[NveDischargePercentile] | None = None,
+    discharge_percentiles: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     normalized_rows = _fetch_timeseries_rows_for_station(
         station=station,
@@ -1049,7 +1049,7 @@ def _build_timeseries_payloads_for_stations(
     nve_hydapi_client: NveHydApiClient | None,
     snower_client: SnowerClient | None,
     discharge_thresholds: dict[int, NveDischargeFloodThreshold] | None = None,
-    discharge_percentiles: dict[int, list[NveDischargePercentile]] | None = None,
+    discharge_percentiles: dict[int, list[dict[str, Any]]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     rows_by_source: dict[str, list[dict[str, Any]]] = {station.source_id: [] for station in stations}
     errors: list[dict[str, str]] = []
@@ -1143,7 +1143,7 @@ def _build_timeseries_payload_from_rows(
     from_dt: datetime,
     to_dt: datetime,
     discharge_threshold: NveDischargeFloodThreshold | None = None,
-    discharge_percentiles: list[NveDischargePercentile] | None = None,
+    discharge_percentiles: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "station": _timeseries_station_properties(station),
@@ -1341,7 +1341,7 @@ def _build_direct_series_payload(
     to_dt: datetime,
     provider: str,
     discharge_threshold: NveDischargeFloodThreshold | None = None,
-    discharge_percentiles: list[NveDischargePercentile] | None = None,
+    discharge_percentiles: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     definition = PARAMETER_DEFINITIONS[parameter_id]
     if parameter_id == "precipitation_24h_rolling":
@@ -2057,7 +2057,7 @@ def _load_discharge_percentiles_for_stations(
     stations: list[Station],
     from_dt: datetime,
     to_dt: datetime,
-) -> dict[int, list[NveDischargePercentile]]:
+) -> dict[int, list[dict[str, Any]]]:
     station_ids = {
         station.id
         for station in stations
@@ -2066,9 +2066,10 @@ def _load_discharge_percentiles_for_stations(
     if not station_ids:
         return {}
 
-    date_mmdds = _date_mmdds_for_range(from_dt, to_dt)
-    if not date_mmdds:
+    date_entries = _date_entries_for_range(from_dt, to_dt)
+    if not date_entries:
         return {}
+    date_mmdds = {entry["date_mmdd"] for entry in date_entries}
 
     rows = (
         session.execute(
@@ -2080,16 +2081,23 @@ def _load_discharge_percentiles_for_stations(
         .scalars()
         .all()
     )
-    rows_by_station: dict[int, list[NveDischargePercentile]] = {}
-    order = {date_mmdd: index for index, date_mmdd in enumerate(date_mmdds)}
-    for row in rows:
-        rows_by_station.setdefault(row.station_id, []).append(row)
-    for station_rows in rows_by_station.values():
-        station_rows.sort(key=lambda row: order.get(row.date_mmdd, 999))
-    return rows_by_station
+    rows_by_station_and_date = {
+        (row.station_id, row.date_mmdd): row
+        for row in rows
+    }
+    payloads_by_station: dict[int, list[dict[str, Any]]] = {}
+    for station_id in station_ids:
+        for entry in date_entries:
+            row = rows_by_station_and_date.get((station_id, entry["date_mmdd"]))
+            if row is None:
+                continue
+            payloads_by_station.setdefault(station_id, []).append(
+                _timeseries_discharge_percentile_payload(row, entry)
+            )
+    return payloads_by_station
 
 
-def _date_mmdds_for_range(from_dt: datetime, to_dt: datetime) -> list[str]:
+def _date_entries_for_range(from_dt: datetime, to_dt: datetime) -> list[dict[str, Any]]:
     start = _ensure_utc(from_dt)
     end = _ensure_utc(to_dt)
     if start is None or end is None:
@@ -2097,17 +2105,36 @@ def _date_mmdds_for_range(from_dt: datetime, to_dt: datetime) -> list[str]:
     if end < start:
         start, end = end, start
 
-    values: list[str] = []
-    seen: set[str] = set()
+    values: list[dict[str, Any]] = []
     current = start.date()
     end_date = end.date()
     while current <= end_date:
-        date_mmdd = current.strftime("%m-%d")
+        point_time = datetime.combine(current, time.min, tzinfo=timezone.utc)
+        values.append(
+            {
+                "date": current.isoformat(),
+                "time": _isoformat(point_time),
+                "timestamp": _timestamp_millis(point_time),
+                "date_mmdd": current.strftime("%m-%d"),
+            }
+        )
+        current += timedelta(days=1)
+    return values
+
+
+def _date_mmdds_for_range(from_dt: datetime, to_dt: datetime) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for entry in _date_entries_for_range(from_dt, to_dt):
+        date_mmdd = entry["date_mmdd"]
         if date_mmdd not in seen:
             values.append(date_mmdd)
             seen.add(date_mmdd)
-        current += timedelta(days=1)
     return values
+
+
+def _timestamp_millis(value: datetime) -> int:
+    return int((_ensure_utc(value) or value).timestamp() * 1000)
 
 
 def _timeseries_discharge_thresholds_payload(
@@ -2125,21 +2152,28 @@ def _timeseries_discharge_thresholds_payload(
     }
 
 
+def _timeseries_discharge_percentile_payload(
+    row: NveDischargePercentile,
+    date_entry: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "date": date_entry["date"],
+        "time": date_entry["time"],
+        "timestamp": date_entry["timestamp"],
+        "date_mmdd": date_entry["date_mmdd"],
+        "mean": row.mean_value,
+        "perc25": row.perc25,
+        "perc60": row.perc60,
+        "perc75": row.perc75,
+        "perc90": row.perc90,
+        "perc95": row.perc95,
+    }
+
+
 def _timeseries_discharge_percentiles_payload(
-    percentiles: list[NveDischargePercentile],
+    percentiles: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    return [
-        {
-            "date": row.date_mmdd,
-            "mean": row.mean_value,
-            "perc25": row.perc25,
-            "perc60": row.perc60,
-            "perc75": row.perc75,
-            "perc90": row.perc90,
-            "perc95": row.perc95,
-        }
-        for row in percentiles
-    ]
+    return percentiles
 
 
 def _discharge_percentile_key(station: Station, latest: StationLatest) -> tuple[int, str] | None:
