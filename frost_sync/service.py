@@ -199,6 +199,7 @@ class SyncService:
                 nve_written, nve_latest = self._store_observations_batch(nve_stations_by_source, nve_rows)
                 observations_written += nve_written
                 latest_updated += nve_latest
+                self.session.commit()
             except Exception as exc:
                 self.session.rollback()
                 logger.exception("Failed to sync NVE HydAPI observations: %s", exc)
