@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from flask import Blueprint, Flask, abort, jsonify, request, send_file
 from sqlalchemy import and_, select
 
+from frost_sync.quality import sanitize_latest, valid_observation, valid_temperature
 from frost_sync.config import Settings, load_settings
 from frost_sync.db import create_session_factory
 from frost_sync.frost_api import FrostClient
@@ -229,6 +230,8 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
 
         features = []
         for observation, station in rows:
+            if not valid_observation(observation, datetime.now(timezone.utc)):
+                continue
             if station.longitude is None or station.latitude is None:
                 continue
 
@@ -366,6 +369,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                         "quality_code": observation.quality_code,
                     }
                     for observation in observations
+                    if valid_observation(observation, datetime.now(timezone.utc))
                 ],
             }
         )
@@ -527,6 +531,8 @@ def build_latest_geojson(session_factory, has_filter: str | None = None) -> dict
 
     features = []
     for station, latest in rows:
+        sanitize_latest(latest, datetime.now(timezone.utc))
+        station.last_observation_time = latest.observed_at
         if station.longitude is None or station.latitude is None:
             continue
         if _is_suspect_nve_feature(station, latest):
@@ -576,6 +582,8 @@ def build_latest_compact_geojson(session_factory) -> dict[str, Any]:
 
     features = []
     for station, latest in rows:
+        sanitize_latest(latest, datetime.now(timezone.utc))
+        station.last_observation_time = latest.observed_at
         if station.longitude is None or station.latitude is None:
             continue
         if _is_suspect_nve_feature(station, latest):
@@ -712,6 +720,8 @@ def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
 
     features = []
     for station, latest in rows:
+        sanitize_latest(latest, datetime.now(timezone.utc))
+        station.last_observation_time = latest.observed_at
         if station.longitude is None or station.latitude is None:
             continue
         if _is_suspect_nve_feature(station, latest):
@@ -804,6 +814,8 @@ def build_daily_geojson(
 
     features = []
     for station, latest in rows:
+        sanitize_latest(latest, datetime.now(timezone.utc))
+        station.last_observation_time = latest.observed_at
         if station.longitude is None or station.latitude is None:
             continue
         if _is_suspect_nve_feature(station, latest):
@@ -1400,10 +1412,12 @@ def _build_direct_points(
     points_by_time: dict[str, dict[str, Any]] = {}
     for row in sorted(rows, key=lambda item: item.get("referenceTime") or ""):
         reference_time = _parse_timestamp(row["referenceTime"])
-        if reference_time < from_dt or reference_time > to_dt:
+        if reference_time < from_dt or reference_time > min(to_dt, datetime.now(timezone.utc)):
             continue
         for observation in row.get("observations", []):
             if observation.get("elementId") not in allowed:
+                continue
+            if parameter_id == "air_temperature" and not valid_temperature(observation.get("value")):
                 continue
             key = _isoformat(reference_time)
             points_by_time[key] = {
@@ -1569,6 +1583,10 @@ def _build_timeseries_series(
     to_dt: datetime,
 ) -> dict[str, Any]:
     definition = PARAMETER_DEFINITIONS[parameter_id]
+    now = datetime.now(timezone.utc)
+    observation_rows = [row for row in observation_rows if valid_observation(row, now)]
+    if latest is not None:
+        sanitize_latest(latest, now)
     if definition["element_ids"]:
         return _build_observation_series(parameter_id, definition, observation_rows)
     return _build_derived_series(parameter_id, definition, observation_rows, latest, from_dt, to_dt)
@@ -1901,7 +1919,10 @@ def _parameter_profile_name(capability_flags: dict[str, bool]) -> str:
 
 
 def _station_properties(station: Station) -> dict[str, Any]:
-    recent_status = _recent_status(station.last_observation_time)
+    observed_at = _ensure_utc(station.last_observation_time)
+    if observed_at is not None and observed_at > datetime.now(timezone.utc):
+        observed_at = None
+    recent_status = _recent_status(observed_at)
     return {
         "source_id": station.source_id,
         "provider": station.provider,
@@ -1916,7 +1937,7 @@ def _station_properties(station: Station) -> dict[str, Any]:
         "valid_from": _isoformat(station.valid_from),
         "valid_to": _isoformat(station.valid_to),
         "last_seen_at": _isoformat(station.last_seen_at),
-        "last_observation_time": _isoformat(station.last_observation_time),
+        "last_observation_time": _isoformat(observed_at),
         "has_recent_data": recent_status["has_recent_data"],
         "minutes_since_observation": recent_status["minutes_since_observation"],
     }
@@ -1933,7 +1954,7 @@ def _timeseries_station_properties(station: Station) -> dict[str, Any]:
 
 
 def _compact_latest_base_properties(station: Station, latest: StationLatest) -> dict[str, Any]:
-    recent_status = _recent_status(station.last_observation_time)
+    recent_status = _recent_status(latest.observed_at)
     return {
         "source_id": station.source_id,
         "provider": station.provider,
@@ -2356,7 +2377,7 @@ def _daily_aggregates_by_station(
     precipitation_totals: dict[int, float] = {}
 
     for row in observation_rows:
-        if row.value is None:
+        if row.value is None or not valid_observation(row, datetime.now(timezone.utc)):
             continue
         row_time = _ensure_utc(row.reference_time)
         if row_time is None:
@@ -2491,7 +2512,7 @@ def _seven_day_aggregates_by_station(
     precipitation_rows: dict[int, list[Observation]] = {}
 
     for row in observation_rows:
-        if row.value is None:
+        if row.value is None or not valid_observation(row, datetime.now(timezone.utc)):
             continue
 
         row_time = _ensure_utc(row.reference_time)
@@ -2622,7 +2643,7 @@ def _station_precipitation_is_excluded(station: Station | None) -> bool:
 
 
 def _air_temperature_value_for_station(station: Station, value: float | None) -> float | None:
-    if _is_suspect_road_station_temperature(station, value):
+    if not valid_temperature(value) or _is_suspect_road_station_temperature(station, value):
         return None
     return value
 
@@ -2751,7 +2772,7 @@ def _ensure_utc(value: datetime | None) -> datetime | None:
 
 def _recent_status(last_observation_time: datetime | None, recent_minutes: int = 120) -> dict[str, Any]:
     observed_at = _ensure_utc(last_observation_time)
-    if observed_at is None:
+    if observed_at is None or observed_at > datetime.now(timezone.utc):
         return {
             "has_recent_data": False,
             "minutes_since_observation": None,

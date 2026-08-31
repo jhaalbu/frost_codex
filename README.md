@@ -204,6 +204,8 @@ See [docs/nve_discharge_classification.md](docs/nve_discharge_classification.md)
 ### 7-day GeoJSON method
 
 - `latest.7d.geojson` is calculated from stored `observations`, not from `station_latest` columns.
+- Incoming observations with a timestamp later than the current UTC time are rejected. Air temperatures outside the inclusive range -60 to +60 degrees Celsius are rejected as well.
+- Exports also filter these invalid historical observations. Invalid cached latest values and future observation timestamps are suppressed; the observation history is not deleted. After deploying this change, run `python -m frost_sync refresh-geojson-cache` to replace existing cached exports, and reload the web application. Normal hourly sync also rebuilds the cache.
 - The time window is always the last 7 days from request time.
 - It returns one feature per station only when at least one 7-day aggregate exists.
 - In normal operation, `run-hourly` pre-generates this endpoint as a cache file; the web route only rebuilds it from the database if the cache file is missing.

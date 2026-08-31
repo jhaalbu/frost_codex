@@ -9,6 +9,7 @@ from typing import Iterable
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from frost_sync.quality import TEMPERATURE_ELEMENTS, sanitize_latest, valid_observation, valid_temperature
 from frost_sync.frost_api import FrostClient, FrostSource, TARGET_ELEMENTS
 from frost_sync.models import (
     NveDischargeFloodThreshold,
@@ -897,11 +898,10 @@ class SyncService:
             if station is None:
                 continue
 
-            reference_time = _normalize_reference_time_for_storage(
-                _ensure_utc(_parse_reference_time(row.get("referenceTime")))
-            )
-            if reference_time is None:
+            raw_time = _ensure_utc(_parse_reference_time(row.get("referenceTime")))
+            if raw_time is None or raw_time > now:
                 continue
+            reference_time = _normalize_reference_time_for_storage(raw_time)
 
             latest = station.latest
             if latest is None:
@@ -914,6 +914,7 @@ class SyncService:
                 self.session.add(latest)
                 station.latest = latest
 
+            sanitize_latest(latest, now)
             has_latest_change = False
             road_station_precipitation_is_suspect = _is_suspect_road_station_precipitation(station, row)
             station_precipitation_is_excluded = station.source_id in EXCLUDED_PRECIPITATION_SOURCE_IDS
@@ -932,7 +933,7 @@ class SyncService:
                     element_id=element_id,
                     value=item.get("value"),
                 )
-                if normalized_value is None and element_id in SNOW_DEPTH_ELEMENT_IDS:
+                if normalized_value is None and element_id in SNOW_DEPTH_ELEMENT_IDS | TEMPERATURE_ELEMENTS:
                     continue
                 if element_id in PRECIPITATION_ELEMENT_IDS and (
                     road_station_precipitation_is_suspect or station_precipitation_is_excluded
@@ -1074,6 +1075,7 @@ class SyncService:
             .all()
         )
 
+        rows = [row for row in rows if valid_observation(row, datetime.now(timezone.utc))]
         precipitation_rows = sorted(
             [row for row in rows if row.element_id in PRECIPITATION_ELEMENT_IDS and row.value is not None],
             key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
@@ -1662,6 +1664,9 @@ def _normalize_observation_value(
     try:
         numeric_value = float(value)
     except (TypeError, ValueError):
+        return None
+
+    if element_id in TEMPERATURE_ELEMENTS and not valid_temperature(numeric_value):
         return None
 
     if element_id in SNOW_DEPTH_ELEMENT_IDS:
