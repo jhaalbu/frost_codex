@@ -14,7 +14,7 @@ class Settings:
     frost_client_id: str | None
     nve_hydapi_key: str | None
     snower_domain_id: str | None
-    snower_api key: str | None
+    snower_api_key: str | None
     database_url: str = DEFAULT_DATABASE_URL
     frost_base_url: str = "https://frost.met.no"
     nve_hydapi_base_url: str = "https://hydapi.nve.no/api/v1"
