@@ -13,10 +13,8 @@ DEFAULT_ENV_FILE = ".env"
 class Settings:
     frost_client_id: str | None
     nve_hydapi_key: str | None
-    snower_username: str | None
-    snower_password: str | None
-    snower_domain: str | None
     snower_domain_id: str | None
+    snower_api key: str | None
     database_url: str = DEFAULT_DATABASE_URL
     frost_base_url: str = "https://frost.met.no"
     nve_hydapi_base_url: str = "https://hydapi.nve.no/api/v1"
@@ -35,10 +33,8 @@ def load_settings() -> Settings:
 
     client_id = os.getenv("FROST_CLIENT_ID", "").strip() or None
     nve_hydapi_key = os.getenv("NVE_HYDAPI_KEY", "").strip() or None
-    snower_username = os.getenv("SNOWER_USERNAME", "").strip() or None
-    snower_password = os.getenv("SNOWER_PASSWORD", "").strip() or None
-    snower_domain = os.getenv("SNOWER_DOMAIN", "").strip() or None
     snower_domain_id = os.getenv("SNOWER_DOMAIN_ID", "").strip() or None
+    snower_api_key = os.getenv("SNOWER_API_KEY", "").strip() or None
     database_url = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL).strip() or DEFAULT_DATABASE_URL
     timeout = int(os.getenv("FROST_TIMEOUT_SECONDS", "60"))
     page_limit = int(os.getenv("FROST_PAGE_LIMIT", "1000"))
