@@ -142,12 +142,10 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
     ) if settings.nve_hydapi_key else None
     snower_client = SnowerClient(
         base_url=settings.snower_base_url,
-        username=settings.snower_username,
-        password=settings.snower_password,
-        domain=settings.snower_domain,
-        domain_id=settings.snower_domain_id,
+        api_key=settings.snower_api_key,
+        domain_id=settings.snower_domain_id or "frost-sync",
         timeout_seconds=settings.request_timeout_seconds,
-    ) if settings.snower_username and settings.snower_password and settings.snower_domain_id else None
+    ) if settings.snower_api_key else None
     blueprint = Blueprint(name, __name__)
 
     @blueprint.get("/health")
