@@ -47,9 +47,7 @@ def load_settings() -> Settings:
     return Settings(
         frost_client_id=client_id,
         nve_hydapi_key=nve_hydapi_key,
-        snower_username=snower_username,
-        snower_password=snower_password,
-        snower_domain=snower_domain,
+        snower_api_key=snower_api_key,
         snower_domain_id=snower_domain_id,
         database_url=database_url,
         nve_hydapi_base_url=os.getenv("NVE_HYDAPI_BASE_URL", "https://hydapi.nve.no/api/v1").strip() or "https://hydapi.nve.no/api/v1",
