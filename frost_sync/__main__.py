@@ -65,9 +65,7 @@ def main() -> None:
         if settings.snower_username and settings.snower_password and settings.snower_domain_id:
             snower_client = SnowerClient(
                 base_url=settings.snower_base_url,
-                username=settings.snower_username,
-                password=settings.snower_password,
-                domain=settings.snower_domain,
+                api_key=settings.snower_api_key,
                 domain_id=settings.snower_domain_id,
                 timeout_seconds=settings.request_timeout_seconds,
             )
