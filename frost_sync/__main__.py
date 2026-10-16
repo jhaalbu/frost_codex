@@ -62,7 +62,7 @@ def main() -> None:
                 timeout_seconds=settings.request_timeout_seconds,
             )
         snower_client = None
-        if settings.snower_username and settings.snower_password and settings.snower_domain_id:
+        if settings.snower_api_key and settings.snower_domain_id:
             snower_client = SnowerClient(
                 base_url=settings.snower_base_url,
                 api_key=settings.snower_api_key,
