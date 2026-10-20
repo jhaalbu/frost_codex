@@ -15,10 +15,14 @@ class Settings:
     nve_hydapi_key: str | None
     snower_domain_id: str | None
     snower_api_key: str | None
+    tilsig_api_key: str | None = None
+    
     database_url: str = DEFAULT_DATABASE_URL
     frost_base_url: str = "https://frost.met.no"
     nve_hydapi_base_url: str = "https://hydapi.nve.no/api/v1"
     snower_base_url: str = "https://app.snower.fi/api"
+    tilsig_base_url: str = "https://api.tilsig.com"
+    
     request_timeout_seconds: int = 60
     page_limit: int = 1000
     source_batch_size: int = 25
@@ -35,6 +39,8 @@ def load_settings() -> Settings:
     nve_hydapi_key = os.getenv("NVE_HYDAPI_KEY", "").strip() or None
     snower_domain_id = os.getenv("SNOWER_DOMAIN_ID", "").strip() or None
     snower_api_key = os.getenv("SNOWER_API_KEY", "").strip() or None
+    tilsig_api_key = os.getenv("TILSIG_API_KEY", "").strip() or None
+    
     database_url = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL).strip() or DEFAULT_DATABASE_URL
     timeout = int(os.getenv("FROST_TIMEOUT_SECONDS", "60"))
     page_limit = int(os.getenv("FROST_PAGE_LIMIT", "1000"))
@@ -49,9 +55,11 @@ def load_settings() -> Settings:
         nve_hydapi_key=nve_hydapi_key,
         snower_api_key=snower_api_key,
         snower_domain_id=snower_domain_id,
+        tilsig_api_key=tilsig_api_key,
         database_url=database_url,
         nve_hydapi_base_url=os.getenv("NVE_HYDAPI_BASE_URL", "https://hydapi.nve.no/api/v1").strip() or "https://hydapi.nve.no/api/v1",
         snower_base_url=os.getenv("SNOWER_BASE_URL", "https://app.snower.fi/api").strip() or "https://app.snower.fi/api",
+        tilsig_base_url=(os.getenv("TILSIG_BASE_URL","https://api.tilsig.com").strip() or "https://api.tilsig.com"),
         request_timeout_seconds=timeout,
         page_limit=page_limit,
         source_batch_size=source_batch_size,
