@@ -25,6 +25,7 @@ from frost_sync.models import (
 )
 from frost_sync.nve_hydapi import NveHydApiClient
 from frost_sync.snower_api import SnowerClient
+from frost_sync.tilsig_api import TilsigClient
 
 
 PARAMETER_DEFINITIONS = {
@@ -146,6 +147,11 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
         domain_id=settings.snower_domain_id or "frost-sync",
         timeout_seconds=settings.request_timeout_seconds,
     ) if settings.snower_api_key else None
+    tilsig_client = TilsigClient(
+        base_url=settings.tilsig_base_url,
+        api_key=settings.tilsig_api_key,
+        timeout_seconds=settings.request_timeout_seconds,
+    ) if settings.tilsig_api_key else None
     blueprint = Blueprint(name, __name__)
 
     @blueprint.get("/health")
@@ -467,6 +473,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                 frost_client=frost_client,
                 nve_hydapi_client=nve_hydapi_client,
                 snower_client=snower_client,
+                tilsig_client=tilsig_client,
                 discharge_threshold=threshold,
                 discharge_percentiles=percentiles.get(station.id, []),
             )
@@ -1021,6 +1028,7 @@ def _build_timeseries_payload_for_station(
     frost_client: FrostClient | None,
     nve_hydapi_client: NveHydApiClient | None,
     snower_client: SnowerClient | None,
+    tilsig_client: TilsigClient | None = None,
     discharge_threshold: NveDischargeFloodThreshold | None = None,
     discharge_percentiles: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -1032,6 +1040,7 @@ def _build_timeseries_payload_for_station(
         frost_client=frost_client,
         nve_hydapi_client=nve_hydapi_client,
         snower_client=snower_client,
+        tilsig_client=tilsig_client,
     )
     return {
         "station": _timeseries_station_properties(station),
@@ -1058,6 +1067,7 @@ def _build_timeseries_payloads_for_stations(
     frost_client: FrostClient | None,
     nve_hydapi_client: NveHydApiClient | None,
     snower_client: SnowerClient | None,
+    tilsig_client: TilsigClient | None = None,
     discharge_thresholds: dict[int, NveDischargeFloodThreshold] | None = None,
     discharge_percentiles: dict[int, list[dict[str, Any]]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
@@ -1112,6 +1122,21 @@ def _build_timeseries_payloads_for_stations(
             try:
                 rows_by_source[station.source_id] = _fetch_snower_timeseries_rows(
                     snower_client=snower_client,
+                tilsig_client=tilsig_client,
+                    station=station,
+                    parameter_ids=parameter_ids,
+                    from_dt=from_dt,
+                    to_dt=to_dt,
+                )
+            except RuntimeError as exc:
+                errors.append({"source_id": station.source_id, "message": str(exc)})
+        elif station.provider == "tilsig":
+            if tilsig_client is None:
+                errors.append({"source_id": station.source_id, "message": "Tilsig client is not configured"})
+                continue
+            try:
+                rows_by_source[station.source_id] = _fetch_tilsig_timeseries_rows(
+                    tilsig_client=tilsig_client,
                     station=station,
                     parameter_ids=parameter_ids,
                     from_dt=from_dt,
@@ -1190,6 +1215,7 @@ def _fetch_timeseries_rows_for_station(
     frost_client: FrostClient | None,
     nve_hydapi_client: NveHydApiClient | None,
     snower_client: SnowerClient | None,
+    tilsig_client: TilsigClient | None = None,
 ) -> list[dict[str, Any]]:
     if station.provider == "frost":
         if frost_client is None:
@@ -1221,6 +1247,17 @@ def _fetch_timeseries_rows_for_station(
             from_dt=from_dt,
             to_dt=to_dt,
         )
+    if station.provider == "tilsig":
+        if tilsig_client is None:
+            raise RuntimeError("Tilsig client is not configured")
+        return _fetch_tilsig_timeseries_rows(
+            tilsig_client=tilsig_client,
+            station=station,
+            parameter_ids=parameter_ids,
+            from_dt=from_dt,
+            to_dt=to_dt,
+        )
+
     raise RuntimeError(f"Unsupported provider: {station.provider}")
 
 
@@ -1313,6 +1350,30 @@ def _fetch_snower_timeseries_rows(
     if not supported:
         return []
     return snower_client.fetch_observations_range(
+        provider_context=station.provider_context,
+        from_dt=from_dt,
+        to_dt=to_dt,
+        logical_parameter_ids=supported,
+    )
+
+
+def _fetch_tilsig_timeseries_rows(
+    tilsig_client: TilsigClient,
+    station: Station,
+    parameter_ids: list[str],
+    from_dt: datetime,
+    to_dt: datetime,
+) -> list[dict[str, Any]]:
+    """Fetch Tilsig history in the shared observation format.
+
+    Device Temperature is intentionally not mapped to air_temperature.
+    """
+    supported = [parameter_id for parameter_id in parameter_ids if parameter_id == "snow_depth"]
+    if not supported:
+        return []
+    if not station.provider_context:
+        raise RuntimeError(f"Tilsig station {station.source_id} has no provider_context; run sync-metadata")
+    return tilsig_client.fetch_observations_range(
         provider_context=station.provider_context,
         from_dt=from_dt,
         to_dt=to_dt,
