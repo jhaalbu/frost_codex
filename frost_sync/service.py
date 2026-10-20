@@ -29,6 +29,7 @@ from frost_sync.nve_hydapi import (
     NveDischargeFloodThresholds,
 )
 from frost_sync.snower_api import SnowerClient, SnowerMonitor
+from frost_sync.tilsig_api import TilsigClient, TilsigMonitor
 
 
 logger = logging.getLogger(__name__)
@@ -91,11 +92,13 @@ class SyncService:
         frost_client: FrostClient,
         nve_hydapi_client: NveHydApiClient | None = None,
         snower_client: SnowerClient | None = None,
+        tilsig_client: TilsigClient | None = None,
     ) -> None:
         self.session = session
         self.frost_client = frost_client
         self.nve_hydapi_client = nve_hydapi_client
         self.snower_client = snower_client
+        self.tilsig_client = tilsig_client
 
     def run_hourly_sync(
         self,
@@ -232,12 +235,35 @@ class SyncService:
                 station_errors += len(snower_monitors)
         stage_started = _log_sync_stage("Snower", stage_started)
 
+        tilsig_station_count = 0
+        if self.tilsig_client is not None:
+            tilsig_monitors = self._load_tilsig_monitors_from_db()
+            tilsig_station_count = len(tilsig_monitors)
+            if tilsig_monitors:
+                try:
+                    tilsig_stations_by_source = self._load_stations_by_provider("tilsig")
+                    tilsig_rows = self.tilsig_client.fetch_latest_observations(tilsig_monitors)
+                    capabilities_updated += self._upsert_capabilities_from_rows(
+                        stations_by_source=tilsig_stations_by_source,
+                        observation_rows=tilsig_rows,
+                    )
+                    tilsig_written, tilsig_latest = self._store_observations_batch(
+                        tilsig_stations_by_source, tilsig_rows
+                    )
+                    observations_written += tilsig_written
+                    latest_updated += tilsig_latest
+                except Exception as exc:
+                    self.session.rollback()
+                    logger.exception("Failed to sync Tilsig observations: %s", exc)
+                    station_errors += len(tilsig_monitors)
+        stage_started = _log_sync_stage("Tilsig", stage_started)
+
         self.session.commit()
         _log_sync_stage("Database commit", stage_started)
         logger.info("Hourly sync completed in %.1fs", perf_counter() - sync_started)
 
         return SyncSummary(
-            stations_seen=frost_station_count + nve_station_count + snower_station_count,
+            stations_seen=frost_station_count + nve_station_count + snower_station_count + tilsig_station_count,
             capabilities_updated=capabilities_updated,
             observations_written=observations_written,
             latest_updated=latest_updated,
@@ -375,9 +401,19 @@ class SyncService:
                 logger.warning("Failed to discover Snower monitors: %s", exc)
                 station_errors += 1
 
+        tilsig_station_count = 0
+        if self.tilsig_client is not None:
+            try:
+                tilsig_monitors = self.tilsig_client.fetch_stations()
+                self._upsert_tilsig_stations(tilsig_monitors)
+                tilsig_station_count = len(tilsig_monitors)
+            except Exception as exc:
+                logger.warning("Failed to discover Tilsig stations: %s", exc)
+                station_errors += 1
+
         self.session.commit()
         return SyncSummary(
-            stations_seen=len(sources) + nve_station_count + snower_station_count,
+            stations_seen=len(sources) + nve_station_count + snower_station_count + tilsig_station_count,
             capabilities_updated=capabilities_updated,
             observations_written=0,
             latest_updated=0,
@@ -581,6 +617,34 @@ class SyncService:
             station.latitude = source.latitude
             station.last_seen_at = now
 
+    def _upsert_tilsig_stations(self, monitors: Iterable[TilsigMonitor]) -> None:
+        now = datetime.now(timezone.utc)
+        monitors = list(monitors)
+        source_ids = [monitor.source_id for monitor in monitors]
+        if not source_ids:
+            return
+
+        existing = self.session.execute(
+            select(Station).where(Station.source_id.in_(source_ids))
+        ).scalars().all()
+        existing_by_source = {station.source_id: station for station in existing}
+
+        for source in monitors:
+            station = existing_by_source.get(source.source_id)
+            if station is None:
+                station = Station(source_id=source.source_id, last_seen_at=now)
+                self.session.add(station)
+                existing_by_source[source.source_id] = station
+
+            station.provider = "tilsig"
+            station.provider_context = source.provider_context
+            station.name = source.name
+            station.stationholder = "Tilsig"
+            station.country = "NO"
+            station.longitude = source.longitude
+            station.latitude = source.latitude
+            station.last_seen_at = now
+
     def _load_stations_by_provider(self, provider: str) -> dict[str, Station]:
         return {
             station.source_id: station
@@ -617,6 +681,25 @@ class SyncService:
                 continue
             monitors.append(
                 SnowerMonitor(
+                    source_id=station.source_id,
+                    name=station.name or station.source_id,
+                    longitude=station.longitude,
+                    latitude=station.latitude,
+                    provider_context=station.provider_context,
+                )
+            )
+        return monitors
+
+    def _load_tilsig_monitors_from_db(self) -> list[TilsigMonitor]:
+        monitors: list[TilsigMonitor] = []
+        stations = self.session.execute(
+            select(Station).where(Station.provider == "tilsig")
+        ).scalars()
+        for station in stations:
+            if not station.provider_context:
+                continue
+            monitors.append(
+                TilsigMonitor(
                     source_id=station.source_id,
                     name=station.name or station.source_id,
                     longitude=station.longitude,
