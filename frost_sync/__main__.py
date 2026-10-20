@@ -9,6 +9,7 @@ from frost_sync.frost_api import FrostClient
 from frost_sync.nve_hydapi import NveHydApiClient
 from frost_sync.service import SyncService
 from frost_sync.snower_api import SnowerClient
+from frost_sync.tilsig_api import TilsigClient
 
 
 def main() -> None:
@@ -69,6 +70,13 @@ def main() -> None:
                 domain_id=settings.snower_domain_id,
                 timeout_seconds=settings.request_timeout_seconds,
             )
+        tilsig_client = None
+        if settings.tilsig_api_key:
+            tilsig_client = TilsigClient(
+                base_url=settings.tilsig_base_url,
+                api_key=settings.tilsig_api_key,
+                timeout_seconds=settings.request_timeout_seconds,
+            )
 
         with session_factory() as session:
             service = SyncService(
@@ -76,6 +84,7 @@ def main() -> None:
                 frost_client=frost_client,
                 nve_hydapi_client=nve_hydapi_client,
                 snower_client=snower_client,
+                tilsig_client=tilsig_client,
             )
             if args.command == "sync-metadata":
                 summary = service.sync_metadata(
