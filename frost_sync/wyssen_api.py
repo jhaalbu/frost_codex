@@ -85,6 +85,7 @@ class WyssenMonitor:
     longitude: float | None
     latitude: float | None
     provider_context: str
+    masl: float | None = None
 
 
 def _utc(value: datetime) -> datetime:
@@ -145,18 +146,23 @@ class WyssenClient:
             raise ValueError(f"Ukjende Wyssen målekodar: {sorted(invalid)}")
         self.session = requests.Session()
         self.session.headers.update({"Accept": "application/json", "User-Agent": "frost-sync/1.0"})
-
+        
     def fetch_stations(self) -> list[WyssenMonitor]:
-        """Known, configured tower list (not discovered through the API)."""
+        """Returnerer konfigurerte Wyssen-stasjonar med koordinatar."""
+    
         return [
             WyssenMonitor(
                 source_id=_source_id(station_id),
-                name=name,
-                longitude=None,
-                latitude=None,
-                provider_context=json.dumps({"station_id": station_id, "station_name": name}),
+                name=info["name"],
+                longitude=info.get("longitude"),
+                latitude=info.get("latitude"),
+                masl=info.get("masl"),
+                provider_context=json.dumps({
+                    "station_id": station_id,
+                    "station_name": info["name"],
+                }),
             )
-            for station_id, name in STATIONS
+            for station_id, info in WYSSEN_STATIONS.items()
         ]
 
     def _get(self, params: list[tuple[str, str]]) -> Any:
