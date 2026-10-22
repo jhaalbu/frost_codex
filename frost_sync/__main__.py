@@ -10,6 +10,7 @@ from frost_sync.nve_hydapi import NveHydApiClient
 from frost_sync.service import SyncService
 from frost_sync.snower_api import SnowerClient
 from frost_sync.tilsig_api import TilsigClient
+from frost_sync.wyssen_api import WyssenClient
 
 
 def main() -> None:
@@ -78,6 +79,14 @@ def main() -> None:
                 timeout_seconds=settings.request_timeout_seconds,
             )
 
+        wyssen_client = None
+
+        if settings.wyssen_api_key:
+            wyssen_client = WyssenClient(
+                api_key=settings.wyssen_api_key,
+                timeout_seconds=settings.request_timeout_seconds,
+            )
+
         with session_factory() as session:
             service = SyncService(
                 session=session,
@@ -85,6 +94,7 @@ def main() -> None:
                 nve_hydapi_client=nve_hydapi_client,
                 snower_client=snower_client,
                 tilsig_client=tilsig_client,
+                wyssen_client=wyssen_client,
             )
             if args.command == "sync-metadata":
                 summary = service.sync_metadata(
