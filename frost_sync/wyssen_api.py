@@ -30,6 +30,33 @@ STATIONS: tuple[tuple[int, str], ...] = (
     (12707, "Skredene 1"),
 )
 
+WYSSEN_STATIONS = {
+    9902: {
+        "name": "Peparstein 1",
+        "latitude": 59.844821,
+        "longitude": 7.082996,
+        "masl": 1304.34,
+    },
+    11894: {
+        "name": "Svandalsflona 1",
+        "latitude": 59.852996,
+        "longitude": 6.94654,
+        "masl": 1225.72,
+    },
+    11886: {
+        "name": "Austmannalia 3",
+        "latitude": 59.858453,
+        "longitude": 6.875693,
+        "masl": 712.76,
+    },
+    12707: {
+        "name": "Skredene 1",
+        "latitude": 61.031989,
+        "longitude": 6.540306,
+        "masl": 802.55,
+    },
+}
+
 # Map directly comparable observations to existing frost_sync logical IDs.
 # MPQ is NOT assumed to be an hourly sum, and MPI is NOT assumed to be
 # equivalent to precipitation_1h. Wind gust period is unspecified.
