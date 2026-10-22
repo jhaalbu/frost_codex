@@ -33,27 +33,27 @@ STATIONS: tuple[tuple[int, str], ...] = (
 WYSSEN_STATIONS = {
     9902: {
         "name": "Peparstein 1",
-        "latitude": 59.845913,
-        "longitude": 7.083711,
-        "masl": 1304.34,
+        "latitude": 59.8445,
+        "longitude": 7.0897,
+        "masl": 1309.34,
     },
     11894: {
         "name": "Svandalsflona 1",
-        "latitude": 59.852996,
-        "longitude": 6.94654,
-        "masl": 1225.72,
+        "latitude": 59.8526,
+        "longitude": 6.9480,
+        "masl": 1200.38,
     },
     11886: {
         "name": "Austmannalia 3",
-        "latitude": 59.858453,
-        "longitude": 6.875693,
-        "masl": 712.76,
+        "latitude": 59.8591,
+        "longitude": 6.8789,
+        "masl":  886.1,
     },
     12707: {
         "name": "Skredene 1",
-        "latitude": 61.031989,
-        "longitude": 6.540306,
-        "masl": 802.55,
+        "latitude": 61.0334,
+        "longitude": 6.5440,
+        "masl": 862.18,
     },
 }
 
