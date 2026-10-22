@@ -725,6 +725,23 @@ class SyncService:
             station.name = source.name
             station.stationholder = "Wyssen"
             station.country = "NO"
+            station.longitude = (
+                source.longitude
+                if source.longitude is not None
+                else station.longitude
+            )
+            
+            station.latitude = (
+                source.latitude
+                if source.latitude is not None
+                else station.latitude
+            )
+            
+            station.masl = (
+                source.masl
+                if source.masl is not None
+                else station.masl
+            )
             # Kjelde-API-et oppgir ikkje koordinatar. Ikkje slett
             # eventuelle koordinatar som er lagde inn manuelt i databasen.
             if source.longitude is not None:
