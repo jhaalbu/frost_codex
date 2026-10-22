@@ -30,6 +30,7 @@ from frost_sync.nve_hydapi import (
 )
 from frost_sync.snower_api import SnowerClient, SnowerMonitor
 from frost_sync.tilsig_api import TilsigClient, TilsigMonitor
+from frost_sync.wyssen_api import WyssenClient, WyssenMonitor
 
 
 logger = logging.getLogger(__name__)
@@ -93,12 +94,14 @@ class SyncService:
         nve_hydapi_client: NveHydApiClient | None = None,
         snower_client: SnowerClient | None = None,
         tilsig_client: TilsigClient | None = None,
+        wyssen_client: WyssenClient | None = None,
     ) -> None:
         self.session = session
         self.frost_client = frost_client
         self.nve_hydapi_client = nve_hydapi_client
         self.snower_client = snower_client
         self.tilsig_client = tilsig_client
+        self.wyssen_client = wyssen_client
 
     def run_hourly_sync(
         self,
@@ -258,12 +261,54 @@ class SyncService:
                     station_errors += len(tilsig_monitors)
         stage_started = _log_sync_stage("Tilsig", stage_started)
 
+        wyssen_station_count = 0
+        if self.wyssen_client is not None:
+            wyssen_monitors = self._load_wyssen_monitors_from_db()
+            wyssen_station_count = len(wyssen_monitors)
+            if wyssen_monitors:
+                try:
+                    wyssen_stations_by_source = self._load_stations_by_provider("wyssen")
+                    # Hent siste to timar, ikkje berre nyaste tidspunkt. Dermed
+                    # mistar me ikkje målingar mellom dei timevise synkane.
+                    to_dt = datetime.now(timezone.utc)
+                    from_dt = to_dt - timedelta(hours=2)
+                    wanted = ["air_temperature", "wind_speed", "wind_from_direction"]
+                    wyssen_rows: list[dict] = []
+                    for monitor in wyssen_monitors:
+                        try:
+                            wyssen_rows.extend(self.wyssen_client.fetch_observations_range(
+                                provider_context=monitor.provider_context,
+                                from_dt=from_dt,
+                                to_dt=to_dt,
+                                logical_parameter_ids=wanted,
+                            ))
+                        except Exception as exc:
+                            logger.warning("Failed to fetch Wyssen observations for %s: %s", monitor.source_id, exc)
+                            station_errors += 1
+
+                    if wyssen_rows:
+                        capabilities_updated += self._upsert_capabilities_from_rows(
+                            stations_by_source=wyssen_stations_by_source,
+                            observation_rows=wyssen_rows,
+                        )
+                        wyssen_written, wyssen_latest = self._store_observations_batch(
+                            wyssen_stations_by_source, wyssen_rows
+                        )
+                        observations_written += wyssen_written
+                        latest_updated += wyssen_latest
+                    logger.info("Wyssen: %s stasjonar, %s observasjonstidspunkt", wyssen_station_count, len(wyssen_rows))
+                except Exception as exc:
+                    self.session.rollback()
+                    logger.exception("Failed to store Wyssen observations: %s", exc)
+                    station_errors += len(wyssen_monitors)
+        stage_started = _log_sync_stage("Wyssen", stage_started)
+
         self.session.commit()
         _log_sync_stage("Database commit", stage_started)
         logger.info("Hourly sync completed in %.1fs", perf_counter() - sync_started)
 
         return SyncSummary(
-            stations_seen=frost_station_count + nve_station_count + snower_station_count + tilsig_station_count,
+            stations_seen=frost_station_count + nve_station_count + snower_station_count + tilsig_station_count + wyssen_station_count,
             capabilities_updated=capabilities_updated,
             observations_written=observations_written,
             latest_updated=latest_updated,
@@ -411,9 +456,20 @@ class SyncService:
                 logger.warning("Failed to discover Tilsig stations: %s", exc)
                 station_errors += 1
 
+        wyssen_station_count = 0
+        if self.wyssen_client is not None:
+            try:
+                wyssen_monitors = self.wyssen_client.fetch_stations()
+                self._upsert_wyssen_stations(wyssen_monitors)
+                wyssen_station_count = len(wyssen_monitors)
+                logger.info("Wyssen: registered %s towers", wyssen_station_count)
+            except Exception as exc:
+                logger.warning("Failed to discover Wyssen stations: %s", exc)
+                station_errors += 1
+
         self.session.commit()
         return SyncSummary(
-            stations_seen=len(sources) + nve_station_count + snower_station_count + tilsig_station_count,
+            stations_seen=len(sources) + nve_station_count + snower_station_count + tilsig_station_count + wyssen_station_count,
             capabilities_updated=capabilities_updated,
             observations_written=0,
             latest_updated=0,
@@ -645,6 +701,38 @@ class SyncService:
             station.latitude = source.latitude
             station.last_seen_at = now
 
+    def _upsert_wyssen_stations(self, monitors: Iterable[WyssenMonitor]) -> None:
+        now = datetime.now(timezone.utc)
+        monitors = list(monitors)
+        source_ids = [monitor.source_id for monitor in monitors]
+        if not source_ids:
+            return
+
+        existing = self.session.execute(
+            select(Station).where(Station.source_id.in_(source_ids))
+        ).scalars().all()
+        existing_by_source = {station.source_id: station for station in existing}
+
+        for source in monitors:
+            station = existing_by_source.get(source.source_id)
+            if station is None:
+                station = Station(source_id=source.source_id, last_seen_at=now)
+                self.session.add(station)
+                existing_by_source[source.source_id] = station
+
+            station.provider = "wyssen"
+            station.provider_context = source.provider_context
+            station.name = source.name
+            station.stationholder = "Wyssen"
+            station.country = "NO"
+            # Kjelde-API-et oppgir ikkje koordinatar. Ikkje slett
+            # eventuelle koordinatar som er lagde inn manuelt i databasen.
+            if source.longitude is not None:
+                station.longitude = source.longitude
+            if source.latitude is not None:
+                station.latitude = source.latitude
+            station.last_seen_at = now
+
     def _load_stations_by_provider(self, provider: str) -> dict[str, Station]:
         return {
             station.source_id: station
@@ -707,6 +795,23 @@ class SyncService:
                     provider_context=station.provider_context,
                 )
             )
+        return monitors
+
+    def _load_wyssen_monitors_from_db(self) -> list[WyssenMonitor]:
+        monitors: list[WyssenMonitor] = []
+        stations = self.session.execute(
+            select(Station).where(Station.provider == "wyssen")
+        ).scalars()
+        for station in stations:
+            if not station.provider_context:
+                continue
+            monitors.append(WyssenMonitor(
+                source_id=station.source_id,
+                name=station.name or station.source_id,
+                longitude=station.longitude,
+                latitude=station.latitude,
+                provider_context=station.provider_context,
+            ))
         return monitors
 
     def _upsert_capabilities_for_elements(
