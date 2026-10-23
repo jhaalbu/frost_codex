@@ -27,6 +27,7 @@ from frost_sync.nve_hydapi import NveHydApiClient
 from frost_sync.snower_api import SnowerClient
 from frost_sync.tilsig_api import TilsigClient
 from frost_sync.wyssen_api import WyssenClient
+from frost_sync.skred_api import SkredClient
 
 
 PARAMETER_DEFINITIONS = {
@@ -157,6 +158,11 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
         api_key=settings.wyssen_api_key,
         timeout_seconds=settings.request_timeout_seconds,
     ) if settings.wyssen_api_key else None
+    skred_client = SkredClient(
+        api_token=settings.skred_api_token,
+        base_url=settings.skred_base_url,
+        timeout_seconds=settings.request_timeout_seconds,
+    ) if settings.skred_api_token else None
     blueprint = Blueprint(name, __name__)
 
     @blueprint.get("/health")
@@ -430,6 +436,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
             snower_client=snower_client,
             tilsig_client=tilsig_client,
             wyssen_client=wyssen_client,
+            skred_client=skred_client,
             discharge_thresholds=discharge_thresholds,
             discharge_percentiles=discharge_percentiles,
         )
@@ -482,6 +489,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                 snower_client=snower_client,
                 tilsig_client=tilsig_client,
                 wyssen_client=wyssen_client,
+                skred_client=skred_client,
                 discharge_threshold=threshold,
                 discharge_percentiles=percentiles.get(station.id, []),
             )
@@ -1038,6 +1046,7 @@ def _build_timeseries_payload_for_station(
     snower_client: SnowerClient | None,
     tilsig_client: TilsigClient | None = None,
     wyssen_client: WyssenClient | None = None,
+    skred_client: SkredClient | None = None,
     discharge_threshold: NveDischargeFloodThreshold | None = None,
     discharge_percentiles: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -1051,6 +1060,7 @@ def _build_timeseries_payload_for_station(
         snower_client=snower_client,
         tilsig_client=tilsig_client,
         wyssen_client=wyssen_client,
+        skred_client=skred_client,
     )
     return {
         "station": _timeseries_station_properties(station),
@@ -1079,6 +1089,7 @@ def _build_timeseries_payloads_for_stations(
     snower_client: SnowerClient | None,
     tilsig_client: TilsigClient | None = None,
     wyssen_client: WyssenClient | None = None,
+    skred_client: SkredClient | None = None,
     discharge_thresholds: dict[int, NveDischargeFloodThreshold] | None = None,
     discharge_percentiles: dict[int, list[dict[str, Any]]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
@@ -1168,6 +1179,20 @@ def _build_timeseries_payloads_for_stations(
                 )
             except RuntimeError as exc:
                 errors.append({"source_id": station.source_id, "message": str(exc)})
+        elif station.provider == "skred":
+            if skred_client is None:
+                errors.append({"source_id": station.source_id, "message": "Skred client is not configured"})
+                continue
+            try:
+                rows_by_source[station.source_id] = _fetch_skred_timeseries_rows(
+                    skred_client=skred_client,
+                    station=station,
+                    parameter_ids=parameter_ids,
+                    from_dt=from_dt,
+                    to_dt=to_dt,
+                )
+            except (RuntimeError, ValueError) as exc:
+                errors.append({"source_id": station.source_id, "message": str(exc)})
         elif station.provider not in {"frost", "nve_hydapi"}:
             errors.append({"source_id": station.source_id, "message": f"Unsupported provider: {station.provider}"})
 
@@ -1241,6 +1266,7 @@ def _fetch_timeseries_rows_for_station(
     snower_client: SnowerClient | None,
     tilsig_client: TilsigClient | None = None,
     wyssen_client: WyssenClient | None = None,
+    skred_client: SkredClient | None = None,
 ) -> list[dict[str, Any]]:
     if station.provider == "frost":
         if frost_client is None:
@@ -1288,6 +1314,17 @@ def _fetch_timeseries_rows_for_station(
             raise RuntimeError("Wyssen client is not configured")
         return _fetch_wyssen_timeseries_rows(
             wyssen_client=wyssen_client,
+            station=station,
+            parameter_ids=parameter_ids,
+            from_dt=from_dt,
+            to_dt=to_dt,
+        )
+
+    if station.provider == "skred":
+        if skred_client is None:
+            raise RuntimeError("Skred client is not configured")
+        return _fetch_skred_timeseries_rows(
+            skred_client=skred_client,
             station=station,
             parameter_ids=parameter_ids,
             from_dt=from_dt,
@@ -1435,6 +1472,34 @@ def _fetch_wyssen_timeseries_rows(
     if not station.provider_context:
         raise RuntimeError(f"Wyssen station {station.source_id} has no provider_context; run sync-metadata")
     return wyssen_client.fetch_observations_range(
+        provider_context=station.provider_context,
+        from_dt=from_dt,
+        to_dt=to_dt,
+        logical_parameter_ids=supported,
+    )
+
+
+
+def _fetch_skred_timeseries_rows(
+    skred_client: SkredClient,
+    station: Station,
+    parameter_ids: list[str],
+    from_dt: datetime,
+    to_dt: datetime,
+) -> list[dict[str, Any]]:
+    """Read Skred AS/InfluxDB observations in the shared timeseries format."""
+    supported = [
+        parameter_id
+        for parameter_id in parameter_ids
+        if parameter_id in {"air_temperature", "wind_speed", "wind_from_direction"}
+    ]
+    if not supported:
+        return []
+    if not station.provider_context:
+        raise RuntimeError(
+            f"Skred station {station.source_id} has no provider_context; run sync-metadata"
+        )
+    return skred_client.fetch_observations_range(
         provider_context=station.provider_context,
         from_dt=from_dt,
         to_dt=to_dt,
