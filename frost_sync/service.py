@@ -31,6 +31,7 @@ from frost_sync.nve_hydapi import (
 from frost_sync.snower_api import SnowerClient, SnowerMonitor
 from frost_sync.tilsig_api import TilsigClient, TilsigMonitor
 from frost_sync.wyssen_api import WyssenClient, WyssenMonitor
+from frost_sync.skred_api import SkredClient, SkredMonitor
 
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,7 @@ class SyncService:
         snower_client: SnowerClient | None = None,
         tilsig_client: TilsigClient | None = None,
         wyssen_client: WyssenClient | None = None,
+        skred_client: SkredClient | None = None,
     ) -> None:
         self.session = session
         self.frost_client = frost_client
@@ -102,6 +104,7 @@ class SyncService:
         self.snower_client = snower_client
         self.tilsig_client = tilsig_client
         self.wyssen_client = wyssen_client
+        self.skred_client = skred_client
 
     def run_hourly_sync(
         self,
@@ -303,12 +306,51 @@ class SyncService:
                     station_errors += len(wyssen_monitors)
         stage_started = _log_sync_stage("Wyssen", stage_started)
 
+        skred_station_count = 0
+        if self.skred_client is not None:
+            skred_monitors = self._load_skred_monitors_from_db()
+            skred_station_count = len(skred_monitors)
+            if skred_monitors:
+                skred_stations_by_source = self._load_stations_by_provider("skred")
+                to_dt = datetime.now(timezone.utc)
+                from_dt = to_dt - timedelta(hours=2)
+                for monitor in skred_monitors:
+                    try:
+                        rows = self.skred_client.fetch_observations_range(
+                            provider_context=monitor.provider_context,
+                            from_dt=from_dt,
+                            to_dt=to_dt,
+                            logical_parameter_ids=[
+                                "air_temperature", "wind_speed", "wind_from_direction",
+                            ],
+                        )
+                        if not rows:
+                            continue
+                        with self.session.begin_nested():
+                            capabilities_updated += self._upsert_capabilities_from_rows(
+                                stations_by_source=skred_stations_by_source,
+                                observation_rows=rows,
+                            )
+                            written, latest = self._store_observations_batch(
+                                skred_stations_by_source, rows
+                            )
+                            # Flush while savepoint is active to isolate SQL errors.
+                            self.session.flush()
+                        observations_written += written
+                        latest_updated += latest
+                        logger.info("Skred AS %s: %s tidspunkt, %s nye observasjonar",
+                                    monitor.source_id, len(rows), written)
+                    except Exception as exc:
+                        logger.exception("Failed to sync Skred AS %s: %s", monitor.source_id, exc)
+                        station_errors += 1
+        stage_started = _log_sync_stage("Skred AS", stage_started)
+
         self.session.commit()
         _log_sync_stage("Database commit", stage_started)
         logger.info("Hourly sync completed in %.1fs", perf_counter() - sync_started)
 
         return SyncSummary(
-            stations_seen=frost_station_count + nve_station_count + snower_station_count + tilsig_station_count + wyssen_station_count,
+            stations_seen=frost_station_count + nve_station_count + snower_station_count + tilsig_station_count + wyssen_station_count + skred_station_count,
             capabilities_updated=capabilities_updated,
             observations_written=observations_written,
             latest_updated=latest_updated,
@@ -467,9 +509,20 @@ class SyncService:
                 logger.warning("Failed to discover Wyssen stations: %s", exc)
                 station_errors += 1
 
+        skred_station_count = 0
+        if self.skred_client is not None:
+            try:
+                skred_monitors = self.skred_client.fetch_stations()
+                self._upsert_skred_stations(skred_monitors)
+                skred_station_count = len(skred_monitors)
+                logger.info("Skred AS: registered %s stations", skred_station_count)
+            except Exception as exc:
+                logger.exception("Failed to discover Skred AS stations: %s", exc)
+                station_errors += 1
+
         self.session.commit()
         return SyncSummary(
-            stations_seen=len(sources) + nve_station_count + snower_station_count + tilsig_station_count + wyssen_station_count,
+            stations_seen=len(sources) + nve_station_count + snower_station_count + tilsig_station_count + wyssen_station_count + skred_station_count,
             capabilities_updated=capabilities_updated,
             observations_written=0,
             latest_updated=0,
@@ -725,29 +778,41 @@ class SyncService:
             station.name = source.name
             station.stationholder = "Wyssen"
             station.country = "NO"
-            station.longitude = (
-                source.longitude
-                if source.longitude is not None
-                else station.longitude
-            )
-            
-            station.latitude = (
-                source.latitude
-                if source.latitude is not None
-                else station.latitude
-            )
-            
-            station.masl = (
-                source.masl
-                if source.masl is not None
-                else station.masl
-            )
             # Kjelde-API-et oppgir ikkje koordinatar. Ikkje slett
             # eventuelle koordinatar som er lagde inn manuelt i databasen.
             if source.longitude is not None:
                 station.longitude = source.longitude
             if source.latitude is not None:
                 station.latitude = source.latitude
+            station.last_seen_at = now
+
+    def _upsert_skred_stations(self, monitors: Iterable[SkredMonitor]) -> None:
+        now = datetime.now(timezone.utc)
+        monitors = list(monitors)
+        source_ids = [monitor.source_id for monitor in monitors]
+        if not source_ids:
+            return
+        existing = self.session.execute(
+            select(Station).where(Station.source_id.in_(source_ids))
+        ).scalars().all()
+        existing_by_source = {station.source_id: station for station in existing}
+        for source in monitors:
+            station = existing_by_source.get(source.source_id)
+            if station is None:
+                station = Station(source_id=source.source_id, last_seen_at=now)
+                self.session.add(station)
+                existing_by_source[source.source_id] = station
+            station.provider = "skred"
+            station.provider_context = source.provider_context
+            station.name = source.name
+            station.stationholder = "Skred AS"
+            station.country = "NO"
+            if source.longitude is not None:
+                station.longitude = source.longitude
+            if source.latitude is not None:
+                station.latitude = source.latitude
+            if source.masl is not None:
+                station.masl = source.masl
             station.last_seen_at = now
 
     def _load_stations_by_provider(self, provider: str) -> dict[str, Station]:
@@ -828,6 +893,24 @@ class SyncService:
                 longitude=station.longitude,
                 latitude=station.latitude,
                 provider_context=station.provider_context,
+            ))
+        return monitors
+
+    def _load_skred_monitors_from_db(self) -> list[SkredMonitor]:
+        monitors: list[SkredMonitor] = []
+        stations = self.session.execute(
+            select(Station).where(Station.provider == "skred")
+        ).scalars()
+        for station in stations:
+            if not station.provider_context:
+                continue
+            monitors.append(SkredMonitor(
+                source_id=station.source_id,
+                name=station.name or station.source_id,
+                longitude=station.longitude,
+                latitude=station.latitude,
+                provider_context=station.provider_context,
+                masl=station.masl,
             ))
         return monitors
 
