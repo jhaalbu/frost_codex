@@ -67,6 +67,14 @@ PARAMETER_DEFINITIONS = {
         "fallback_aggregation": "max",
         "style": "line",
     },
+    # Skred AS/InﬂuxDB: eigne felt, uavhengig av eksisterande timesaggregat.
+    "wind_speed_of_gust": {"label": "Vindkast (Skred AS)", "unit": "m/s", "element_ids": ["wind_speed_of_gust"], "style": "line"},
+    "wind_speed_fc_low": {"label": "Vindhastigheit snøfokksensor låg", "unit": "m/s", "element_ids": ["wind_speed_fc_low"], "style": "line"},
+    "wind_speed_fc_high": {"label": "Vindhastigheit snøfokksensor høg", "unit": "m/s", "element_ids": ["wind_speed_fc_high"], "style": "line"},
+    "snow_drift_low": {"label": "Snøfokk låg sensor", "unit": "g/m2/s", "element_ids": ["snow_drift_low"], "style": "line"},
+    "snow_drift_high": {"label": "Snøfokk høg sensor", "unit": "g/m2/s", "element_ids": ["snow_drift_high"], "style": "line"},
+    "snow_drift_low_cumsum": {"label": "Akkumulert snøfokk låg sensor", "unit": "g/m2/10min", "element_ids": ["snow_drift_low_cumsum"], "style": "line"},
+    "snow_drift_high_cumsum": {"label": "Akkumulert snøfokk høg sensor", "unit": "g/m2/10min", "element_ids": ["snow_drift_high_cumsum"], "style": "line"},
     "discharge": {"label": "Vannforing", "unit": "m3/s", "element_ids": ["discharge"], "style": "line"},
     "groundwater_level": {"label": "Grunnvannsniva", "unit": "m", "element_ids": ["groundwater_level"], "style": "line"},
 }
@@ -1491,7 +1499,12 @@ def _fetch_skred_timeseries_rows(
     supported = [
         parameter_id
         for parameter_id in parameter_ids
-        if parameter_id in {"air_temperature", "wind_speed", "wind_from_direction"}
+        if parameter_id in {
+            "air_temperature", "wind_speed", "wind_from_direction",
+            "wind_speed_of_gust", "wind_speed_fc_low", "wind_speed_fc_high",
+            "snow_drift_low", "snow_drift_high",
+            "snow_drift_low_cumsum", "snow_drift_high_cumsum",
+        }
     ]
     if not supported:
         return []
