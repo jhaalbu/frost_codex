@@ -11,6 +11,7 @@ from frost_sync.service import SyncService
 from frost_sync.snower_api import SnowerClient
 from frost_sync.tilsig_api import TilsigClient
 from frost_sync.wyssen_api import WyssenClient
+from frost_sync.skred_api import SkredClient
 
 
 def main() -> None:
@@ -87,6 +88,15 @@ def main() -> None:
                 timeout_seconds=settings.request_timeout_seconds,
             )
 
+        skred_client = None
+
+        if settings.skred_api_token:
+            skred_client = SkredClient(
+                api_token=settings.skred_api_token,
+                base_url=settings.skred_base_url,
+                timeout_seconds=settings.request_timeout_seconds,
+            )
+
         with session_factory() as session:
             service = SyncService(
                 session=session,
@@ -95,6 +105,7 @@ def main() -> None:
                 snower_client=snower_client,
                 tilsig_client=tilsig_client,
                 wyssen_client=wyssen_client,
+                skred_client=skred_client,
             )
             if args.command == "sync-metadata":
                 summary = service.sync_metadata(
