@@ -17,6 +17,7 @@ class Settings:
     snower_api_key: str | None
     tilsig_api_key: str | None = None
     wyssen_api_key: str | None = None
+    skred_api_token: str | None = None
     
     database_url: str = DEFAULT_DATABASE_URL
     frost_base_url: str = "https://frost.met.no"
@@ -24,6 +25,7 @@ class Settings:
     snower_base_url: str = "https://app.snower.fi/api"
     tilsig_base_url: str = "https://api.tilsig.com"
     wyssen_base_url: str = "https://control.wyssenavalanche.com/app/api"
+    skred_base_url: str = "https://api.skredvarsling.no"
     
     request_timeout_seconds: int = 60
     page_limit: int = 1000
@@ -43,6 +45,7 @@ def load_settings() -> Settings:
     snower_api_key = os.getenv("SNOWER_API_KEY", "").strip() or None
     tilsig_api_key = os.getenv("TILSIG_API_KEY", "").strip() or None
     wyssen_api_key = os.getenv("WYSSEN_API_KEY", "").strip() or None
+    skred_api_token = os.getenv("SKRED_API_TOKEN", "").strip() or None
     
     database_url = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL).strip() or DEFAULT_DATABASE_URL
     timeout = int(os.getenv("FROST_TIMEOUT_SECONDS", "60"))
@@ -60,11 +63,13 @@ def load_settings() -> Settings:
         snower_domain_id=snower_domain_id,
         tilsig_api_key=tilsig_api_key,
         wyssen_api_key=wyssen_api_key,
+        skred_api_token=skred_api_token,
         database_url=database_url,
         nve_hydapi_base_url=os.getenv("NVE_HYDAPI_BASE_URL", "https://hydapi.nve.no/api/v1").strip() or "https://hydapi.nve.no/api/v1",
         snower_base_url=os.getenv("SNOWER_BASE_URL", "https://app.snower.fi/api").strip() or "https://app.snower.fi/api",
         tilsig_base_url=(os.getenv("TILSIG_BASE_URL","https://api.tilsig.com").strip() or "https://api.tilsig.com"),
         wyssen_base_url=(os.getenv("TILSIG_BASE_URL","https://control.wyssenavalanche.com/app/api").strip() or "https://control.wyssenavalanche.com/app/api"),
+        skred_base_url=(os.getenv("SKRED_BASE_URL","https://api.skredvarsling.no").strip()or "https://api.skredvarsling.no"),
         request_timeout_seconds=timeout,
         page_limit=page_limit,
         source_batch_size=source_batch_size,
