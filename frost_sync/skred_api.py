@@ -53,8 +53,8 @@ FIELD_UNITS: dict[str, str] = {
 }
 DEFAULT_FIELDS = ("air_temperature", "wind_speed", "wind_from_direction")
 STATIONS = (
-    {"station_id": "cs001", "name": "Vikafjell", "latitude": 60.9462,
-     "longitude": 6.4489, "masl": 971.0, "station_name": "cs001_Vikafjell"},
+    {"station_id": "cs001", "name": "Vikafjell", "latitude": 60.962746352,
+     "longitude": 6.483825087, "masl": 971.5, "station_name": "cs001_Vikafjell"},
 )
 
 
