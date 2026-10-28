@@ -18,6 +18,7 @@ Kart og graf kan vise ulike verdiar og ulik datadekning. Eit nytt kartkall garan
 | [Drift og oppsett](docs/operations.md) | Oppstart, miljøvariablar, PythonAnywhere og feilsøking |
 | [Datametodar](docs/data_methods.md) | Kvalitetsfilter, nedbør, snø, døgn- og sjudøgnsberekningar |
 | [NVE-klassifisering](docs/nve_discharge_classification.md) | Vassføring, persentilar og flaumklassar |
+| [HBV-vassføring](docs/nve_hbv.md) | Modellserie til graf og prognose for neste døgn i latest-kartlaga |
 | [Kodegjennomgang 2026-10-28](docs/review-2026-10-28.md) | Konkrete funn og prioriterte oppfølgingspunkt |
 
 ## Lokal oppstart

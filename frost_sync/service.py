@@ -32,6 +32,7 @@ from frost_sync.snower_api import SnowerClient, SnowerMonitor
 from frost_sync.tilsig_api import TilsigClient, TilsigMonitor
 from frost_sync.wyssen_api import WyssenClient, WyssenMonitor
 from frost_sync.skred_api import SkredClient, SkredMonitor
+from frost_sync.nve_veps import NveVepsClient, next_hbv_reference_time
 
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,7 @@ class SyncService:
         tilsig_client: TilsigClient | None = None,
         wyssen_client: WyssenClient | None = None,
         skred_client: SkredClient | None = None,
+        veps_client: NveVepsClient | None = None,
     ) -> None:
         self.session = session
         self.frost_client = frost_client
@@ -105,6 +107,7 @@ class SyncService:
         self.tilsig_client = tilsig_client
         self.wyssen_client = wyssen_client
         self.skred_client = skred_client
+        self.veps_client = veps_client
 
     def run_hourly_sync(
         self,
@@ -347,6 +350,10 @@ class SyncService:
 
         self.session.commit()
         _log_sync_stage("Database commit", stage_started)
+        if self.veps_client is not None:
+            hbv_updated, hbv_errors = self.sync_hbv_forecasts()
+            latest_updated += hbv_updated
+            station_errors += hbv_errors
         logger.info("Hourly sync completed in %.1fs", perf_counter() - sync_started)
 
         return SyncSummary(
@@ -357,6 +364,54 @@ class SyncService:
             observations_deleted=0,
             station_errors=station_errors,
         )
+
+    def sync_hbv_forecasts(self, now: datetime | None = None) -> tuple[int, int]:
+        """Store tomorrow's daily model point without touching observations.
+
+        Called after the observation commit. Each batch has its own transaction,
+        so VEPS outages cannot roll back observed data or successful batches.
+        """
+        if self.veps_client is None:
+            return 0, 0
+        now = now or datetime.now(timezone.utc)
+        target = next_hbv_reference_time(now)
+        source_ids = list(self.session.scalars(
+            select(Station.source_id).where(Station.provider == "nve_hydapi")
+        ))
+        updated = errors = 0
+        for batch in _chunked(source_ids, 25):
+            try:
+                rows = self.veps_client.fetch_observations_range(
+                    batch, target - timedelta(hours=6), target + timedelta(hours=18),
+                )
+                by_source = {
+                    row["sourceId"]: row["observations"][0]["value"]
+                    for row in rows
+                    if _parse_reference_time(row["referenceTime"]) == target
+                }
+                stations = self.session.scalars(select(Station).where(Station.source_id.in_(batch))).all()
+                changed = 0
+                for station in stations:
+                    latest = self.session.get(StationLatest, station.id)
+                    value = by_source.get(station.source_id)
+                    if latest is None:
+                        if value is None:
+                            continue
+                        latest = StationLatest(station_id=station.id, source_id=station.source_id,
+                                               updated_at=now)
+                        self.session.add(latest)
+                    latest.discharge_hbv = value
+                    latest.discharge_hbv_forecast_time = target if value is not None else None
+                    latest.discharge_hbv_fetched_at = now
+                    changed += 1
+                self.session.commit()
+                updated += changed
+            except Exception:
+                self.session.rollback()
+                errors += len(batch)
+                logger.exception("Failed to sync NVE VEPS HBV forecasts for %s", ",".join(batch))
+        logger.info("VEPS HBV next day: updated=%s errors=%s target=%s", updated, errors, target)
+        return updated, errors
 
     def sync_metadata(
         self,

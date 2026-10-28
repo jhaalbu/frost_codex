@@ -19,6 +19,8 @@ Frost brukar HTTP Basic med klient-ID som brukarnamn og tomt passord. Metadata k
 
 NVE sender nøkkelen i `X-API-Key`. HydAPI-seriar blir mappa til felles parameterar. Metadatajobben hentar òg persentilar og prøver å hente flaumstatistikk frå Chartserver. Sjå [klassifiseringa](nve_discharge_classification.md) for tydinga av klassane.
 
+HBV-modellert vassføring blir i tillegg henta frå VEPS som eigen parameter `discharge_hbv`, med morgondagens prognose i alle latest-variantane. Sjå [HBV-oppsettet](nve_hbv.md).
+
 ## Snower
 
 Klienten brukar den konfigurerte `snk_`-nøkkelen i `authentication-key`, saman med `domain-id`. Brukarnamn/passord og `/login` er ikkje del av implementasjonen.

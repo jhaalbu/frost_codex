@@ -1,57 +1,60 @@
-# NVE discharge classification and rating curves
+# NVE: klassifisering av vassføring og vassføringskurver
 
-This note describes how HydAPI rating curves can be used in this app, and which data fields we should expose for ArcGIS/VertiGIS symbolization.
+Dette notatet skildrar korleis vassføringskurver frå HydAPI kan brukast i appen, og kva datafelt som bør eksponerast for symbolisering i ArcGIS/VertiGIS.
 
-## What HydAPI rating curves provide
+For modellert vassføring i seNorge, sjå [utforsking av HBV og VEPS for Storeskar](nve_hbv_exploration.md). Dette er ei eiga datakjelde, skild frå observasjonsseriane i HydAPI.
 
-HydAPI `Ratingcurves` lists discharge series that have available rating curves.
+## Kva vassføringskurvene i HydAPI gir
 
-For a specific station, `GET /api/v1/Ratingcurves/{stationId}` returns one or more curve periods. Each period is limited by `dtStartDate` and `dtEndDate`. If `dtEndDate` is null, the period is still active.
+HydAPI `Ratingcurves` listar vassføringsseriar som har tilgjengelege vassføringskurver.
 
-Each period can contain one or more segments. A segment is valid from `minimum` to `maximum`, and discharge is calculated as:
+For ein bestemt stasjon returnerer `GET /api/v1/Ratingcurves/{stationId}` éin eller fleire kurveperiodar. Kvar periode er avgrensa av `dtStartDate` og `dtEndDate`. Dersom `dtEndDate` er `null`, er perioden framleis aktiv.
+
+Kvar periode kan innehalde eitt eller fleire segment. Eit segment gjeld frå `minimum` til `maximum`, og vassføringa blir rekna ut slik:
 
 ```text
 Q = constant * (input - zero) ^ exponent
 ```
 
-In this formula:
+Formelen brukar desse verdiane:
 
-- `input` is water stage.
-- `Q` is discharge.
-- `constant`, `zero` and `exponent` come from the selected segment.
-- the selected segment is the segment where water stage is within `minimum` and `maximum`.
+- `input` er vasstand.
+- `Q` er vassføring.
+- `constant`, `zero` og `exponent` kjem frå det valde segmentet.
 
-## What rating curves do not provide
+Det valde segmentet er det segmentet der vasstanden ligg innanfor `minimum` og `maximum`.
 
-Rating curves do not tell us whether the current discharge is:
+## Kva vassføringskurvene ikkje gir
 
-- over 50-year flood
-- between 5-year and 50-year flood
-- between mean annual flood and 5-year flood
-- large, normal or low discharge
+Vassføringskurvene fortel ikkje om den aktuelle vassføringa er:
 
-Those classes require classification thresholds. HydAPI rating curves only convert water stage to discharge. This app now obtains the thresholds from NVE Chartserver statistics for the versioned discharge series and stores them locally.
+- på nivå med eller over 50-årsflaum
+- mellom 5-årsflaum og 50-årsflaum
+- mellom middelflaum og 5-årsflaum
+- høg, normal eller låg
 
-HydAPI `Percentiles` can help classify normal, high and low flow if percentile data exists for the station/parameter, but percentiles are separate from rating curves.
+Desse klassane krev klassifiseringstersklar. Vassføringskurvene i HydAPI omreknar berre vasstand til vassføring. Appen hentar no tersklane frå NVE Chartserver-statistikk for vassføringsserien med rett versjon og lagrar dei lokalt.
 
-## Suggested map fields
+HydAPI `Percentiles` kan bidra til å klassifisere normal, høg og låg vassføring dersom persentildata finst for stasjonen/parameteren. Persentilar er likevel skilde frå vassføringskurver.
 
-To make symbolization simple, the GeoJSON should expose one flat field for the class and a few supporting fields.
+## Framlegg til kartfelt
 
-Recommended fields:
+For å gjere symbolisering enkel bør GeoJSON eksponere eitt flatt felt for klassen og nokre støttefelt.
 
-- `discharge`: latest discharge value in m3/s.
-- `discharge_observed_at`: timestamp for latest discharge observation.
-- `discharge_age_hours`: age of latest discharge observation.
-- `discharge_age_class`: `fresh`, `stale_4_24h`, `stale_over_24h` or `missing`.
-- `discharge_class`: symbol class name.
-- `discharge_class_rank`: numeric rank for sorting and renderer rules.
-- `discharge_class_source`: `flood_threshold`, `percentile`, `rating_curve`, `latest_value_only` or `none`.
-- `discharge_classification_missing`: true when discharge exists but no classification threshold exists.
-- `discharge_value_missing`: true when no discharge value exists.
-- `discharge_error`: optional short error/status text.
+Tilrådde felt:
 
-Suggested `discharge_class` values:
+- `discharge`: siste vassføringsverdi i m³/s.
+- `discharge_observed_at`: tidsstempel for siste vassføringsobservasjon.
+- `discharge_age_hours`: alder på siste vassføringsobservasjon.
+- `discharge_age_class`: `fresh`, `stale_4_24h`, `stale_over_24h` eller `missing`.
+- `discharge_class`: namn på symbolklassen.
+- `discharge_class_rank`: numerisk rang for sortering og symboliseringsreglar.
+- `discharge_class_source`: `flood_threshold`, `percentile`, `rating_curve`, `latest_value_only` eller `none`.
+- `discharge_classification_missing`: `true` når vassføring finst, men klassifiseringstersklar manglar.
+- `discharge_value_missing`: `true` når vassføringsverdi manglar.
+- `discharge_error`: valfri, kort feil-/statustekst.
+
+Framlegg til verdiar for `discharge_class`:
 
 - `flood_over_50y`
 - `flood_5y_to_50y`
@@ -65,37 +68,37 @@ Suggested `discharge_class` values:
 - `missing_classification`
 - `other_error`
 
-Suggested `discharge_class_rank` values:
+Framlegg til verdiar for `discharge_class_rank`:
 
-- `90`: over 50-year flood
-- `80`: between 5-year and 50-year flood
-- `70`: between mean annual flood and 5-year flood
-- `60`: high plus
-- `50`: high
-- `40`: high minus
+- `90`: på nivå med eller over 50-årsflaum
+- `80`: mellom 5-årsflaum og 50-årsflaum
+- `70`: mellom middelflaum og 5-årsflaum
+- `60`: høg pluss
+- `50`: høg
+- `40`: høg minus
 - `30`: normal
-- `20`: low
-- `10`: missing classification
-- `0`: missing value
-- `-1`: other error
+- `20`: låg
+- `10`: manglande klassifisering
+- `0`: manglande verdi
+- `-1`: annan feil
 
-## Classification method proposal
+## Framlegg til klassifiseringsmetode
 
-Use this priority order:
+Bruk denne prioriteringa:
 
-1. If latest discharge is missing, set `discharge_class = missing_value`.
-2. If flood thresholds exist for the station, classify against those first.
-3. If flood thresholds do not exist but percentile thresholds exist, classify with percentiles.
-4. If only discharge exists, set `discharge_class = missing_classification`.
-5. If there is an API or calculation error, set `discharge_class = other_error`.
+1. Dersom siste vassføring manglar, set `discharge_class = missing_value`.
+2. Dersom stasjonen har flaumtersklar, klassifiser mot desse først.
+3. Dersom flaumtersklar manglar, men persentilgrenser finst, bruk persentilklassifisering.
+4. Dersom berre vassføring finst, set `discharge_class = missing_classification`.
+5. Ved API- eller berekningsfeil, set `discharge_class = other_error`.
 
-Flood-threshold classification:
+Klassifisering etter flaumtersklar:
 
 - `discharge >= q50`: `flood_over_50y`
 - `q5 <= discharge < q50`: `flood_5y_to_50y`
 - `qm <= discharge < q5`: `flood_mean_to_5y`
 
-Percentile-based fallback:
+Persentilbasert klassifisering som tilbakefall:
 
 - `discharge >= perc90`: `high_plus`
 - `perc75 <= discharge < perc90`: `high`
@@ -103,17 +106,17 @@ Percentile-based fallback:
 - `perc25 <= discharge < perc60`: `normal`
 - `discharge < perc25`: `low`
 
-This is a practical percentile-based classification, not the same as NVE flood warning thresholds.
+Dette er ei praktisk persentilbasert klassifisering, ikkje det same som tersklane for flaumvarsling frå NVE.
 
-## Rating curve use in this app
+## Bruk av vassføringskurver i appen
 
-Rating curves are most useful when:
+Vassføringskurver er særleg nyttige når:
 
-- a station has water stage but not direct discharge
-- we want to validate discharge against stage
-- we want to show whether a discharge value was measured directly or calculated from stage
+- ein stasjon har vasstand, men ikkje direkte vassføring
+- vi vil kontrollere vassføring mot vasstand
+- vi vil vise om ein vassføringsverdi er målt direkte eller rekna ut frå vasstand
 
-Suggested future fields if we calculate discharge from stage:
+Framlegg til framtidige felt dersom vi reknar ut vassføring frå vasstand:
 
 - `water_stage`
 - `water_stage_observed_at`
@@ -125,11 +128,11 @@ Suggested future fields if we calculate discharge from stage:
 - `discharge_calculated_from_stage`
 - `discharge_calculation_error`
 
-For the current map symbolization, direct `discharge` from HydAPI is the simplest and safest starting point. Rating curves can be added later to fill gaps for stations that only expose water stage.
+For dagens kartsymbolisering er direkte `discharge` frå HydAPI det enklaste og tryggaste utgangspunktet. Vassføringskurver kan leggjast til seinare for å fylle hol for stasjonar som berre eksponerer vasstand.
 
-## First implementation step
+## Første implementeringssteg
 
-The app stores HydAPI discharge percentiles in `nve_discharge_percentiles` when `sync-metadata` is run. The compact/latest GeoJSON then joins today's percentile row to the latest discharge value and emits:
+Appen lagrar vassføringspersentilar frå HydAPI i `nve_discharge_percentiles` når `sync-metadata` blir køyrd. Latest- og compact-GeoJSON koplar persentilrada for observasjonsdatoen til siste vassføringsverdi og eksponerer:
 
 - `discharge_observed_at`
 - `discharge_age_hours`
@@ -146,7 +149,7 @@ The app stores HydAPI discharge percentiles in `nve_discharge_percentiles` when 
 - `discharge_perc90`
 - `discharge_perc95`
 
-If a station has discharge but no percentile row for the current date, it gets:
+Dersom ein stasjon har vassføring, men manglar persentilrad for observasjonsdatoen og ikkje kan klassifiserast med flaumtersklar, får han:
 
 ```text
 discharge_class = missing_classification
@@ -154,13 +157,13 @@ discharge_class_source = latest_value_only
 discharge_classification_missing = true
 ```
 
-If a station has percentile data, `discharge_class_source = percentile`.
+Ved persentilklassifisering får stasjonen `discharge_class_source = percentile`.
 
-## Flood-threshold implementation
+## Implementering av flaumtersklar
 
-For an NVE discharge series such as `84.21.0.1001.1`, `84.21.0` is the station ID, `1001` is the discharge parameter and the final `1` is the series version. The version is discovered from HydAPI series metadata rather than assumed.
+For ein NVE-vassføringsserie som `84.21.0.1001.1` er `84.21.0` stasjons-ID, `1001` vassføringsparameteren og den siste `1` serieversjonen. Versjonen blir henta frå seriemetadata i HydAPI og blir ikkje teken for gitt.
 
-During `sync-metadata`, the app requests Chartserver statistics `qcm`, `qc5` and `qc50` and stores one `nve_discharge_flood_thresholds` row per station. GeoJSON exposes:
+Under `sync-metadata` hentar appen Chartserver-statistikkane `qcm`, `qc5` og `qc50` og lagrar éi rad i `nve_discharge_flood_thresholds` per stasjon. GeoJSON eksponerer:
 
 - `discharge_flood_qm`
 - `discharge_flood_q5`
@@ -169,10 +172,10 @@ During `sync-metadata`, the app requests Chartserver statistics `qcm`, `qc5` and
 - `discharge_flood_series_version`
 - `discharge_flood_updated_at`
 
-Flood classification takes priority when the latest discharge reaches a flood threshold. Below `QM`, the daily HydAPI percentile classification remains the fallback. A Chartserver error affects only that station and does not delete a previously stored threshold row.
+Flaumklassifisering har prioritet når siste vassføring når ein flaumterskel. Under `QM` blir døgnpersentilane frå HydAPI brukte som tilbakefall. Ein Chartserver-feil påverkar berre den aktuelle stasjonen og slettar ikkje ei tidlegare lagra terskelrad.
 
-Deployment notes:
+Merknader ved utrulling:
 
-- Run `python -m frost_sync init-db` once after deploying this change so the new `nve_discharge_percentiles` table exists.
-- Run `python -m frost_sync sync-metadata` to populate or refresh NVE percentile rows.
-- Run `python -m frost_sync run-hourly` or `python -m frost_sync refresh-geojson-cache` after that so the cached GeoJSON includes the new fields.
+- Køyr `python -m frost_sync init-db` éin gong etter utrulling av denne funksjonen, slik at den nye tabellen `nve_discharge_percentiles` finst.
+- Køyr `python -m frost_sync sync-metadata` for å fylle eller oppdatere NVE-persentilradene.
+- Køyr deretter `python -m frost_sync run-hourly` eller `python -m frost_sync refresh-geojson-cache`, slik at dei mellomlagra GeoJSON-filene inneheld dei nye felta.

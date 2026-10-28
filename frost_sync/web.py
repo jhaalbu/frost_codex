@@ -24,6 +24,7 @@ from frost_sync.models import (
     StationLatest,
 )
 from frost_sync.nve_hydapi import NveHydApiClient
+from frost_sync.nve_veps import next_hbv_reference_time
 from frost_sync.snower_api import SnowerClient
 from frost_sync.tilsig_api import TilsigClient
 from frost_sync.wyssen_api import WyssenClient
@@ -76,6 +77,7 @@ PARAMETER_DEFINITIONS = {
     "snow_drift_low_cumsum": {"label": "Akkumulert snøfokk låg sensor", "unit": "g/m2/10min", "element_ids": ["snow_drift_low_cumsum"], "style": "line"},
     "snow_drift_high_cumsum": {"label": "Akkumulert snøfokk høg sensor", "unit": "g/m2/10min", "element_ids": ["snow_drift_high_cumsum"], "style": "line"},
     "discharge": {"label": "Vannforing", "unit": "m3/s", "element_ids": ["discharge"], "style": "line"},
+    "discharge_hbv": {"label": "Modellert vassføring – HBV (døgn)", "unit": "m3/s", "element_ids": ["discharge_hbv"], "style": "line"},
     "groundwater_level": {"label": "Grunnvannsniva", "unit": "m", "element_ids": ["groundwater_level"], "style": "line"},
 }
 
@@ -149,6 +151,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
     nve_hydapi_client = NveHydApiClient(
         base_url=settings.nve_hydapi_base_url,
         api_key=settings.nve_hydapi_key,
+        veps_base_url=settings.nve_veps_base_url,
         timeout_seconds=settings.request_timeout_seconds,
     ) if settings.nve_hydapi_key else None
     snower_client = SnowerClient(
@@ -670,6 +673,8 @@ def _fme_property_value(value: Any) -> Any:
 
 
 def _keep_fme_latest_property(key: str) -> bool:
+    if key == "discharge_hbv" or key.startswith("discharge_hbv_"):
+        return True
     if key.endswith("_unit"):
         return False
     if key in {
@@ -757,8 +762,9 @@ def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
             continue
 
         aggregates = aggregates_by_station.get(station.id)
-        if not aggregates:
+        if not aggregates and not _hbv_latest_properties(latest)["has_discharge_hbv"]:
             continue
+        aggregates = aggregates or {}
 
         discharge_max = aggregates.get("discharge_max_7d")
         discharge_max_time = aggregates.get("discharge_max_7d_time")
@@ -772,6 +778,7 @@ def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
         )
         properties = {
             **_compact_latest_base_properties(station, latest),
+            **_hbv_latest_properties(latest),
             **aggregates,
             "discharge_class": discharge_classification.get("discharge_class"),
         }
@@ -933,15 +940,28 @@ def _cached_geojson_response(settings: Settings, filename: str) -> Any | None:
     if not path.exists():
         return None
 
+    # A forecast labelled "tomorrow" must not survive a Norwegian date change.
+    # Database fallback then suppresses any row targeting the previous day.
+    now = datetime.now(timezone.utc)
+    if filename.startswith("latest") and (
+        datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).astimezone(DAILY_TIMEZONE).date()
+        != now.astimezone(DAILY_TIMEZONE).date()
+    ):
+        return None
+    next_midnight = datetime.combine(
+        now.astimezone(DAILY_TIMEZONE).date() + timedelta(days=1), time.min,
+        tzinfo=DAILY_TIMEZONE,
+    ).astimezone(timezone.utc)
+    max_age = min(300, max(0, int((next_midnight - now).total_seconds())))
     gzip_path = path.with_suffix(path.suffix + ".gz")
     if gzip_path.exists() and "gzip" in request.headers.get("Accept-Encoding", ""):
-        response = send_file(gzip_path, mimetype="application/geo+json", conditional=True, max_age=300)
+        response = send_file(gzip_path, mimetype="application/geo+json", conditional=True, max_age=max_age)
         response.headers["Content-Encoding"] = "gzip"
         response.headers["Vary"] = "Accept-Encoding"
         response.headers["X-GeoJSON-Cache"] = "file-gzip"
         return response
 
-    response = send_file(path, mimetype="application/geo+json", conditional=True, max_age=300)
+    response = send_file(path, mimetype="application/geo+json", conditional=True, max_age=max_age)
     response.headers["X-GeoJSON-Cache"] = "file"
     return response
 
@@ -1385,17 +1405,8 @@ def _fetch_nve_timeseries_rows(
     from_dt: datetime,
     to_dt: datetime,
 ) -> list[dict[str, Any]]:
-    series_specs = hydapi_client.fetch_series_specs_for_station(source_id)
-    if not series_specs:
-        return []
-    needed = set(parameter_ids)
-    if "precipitation_24h_rolling" in needed:
-        needed.add("precipitation_1h")
-    filtered_specs = [spec for spec in series_specs if spec.logical_element_id in needed]
-    return hydapi_client.fetch_observations_range(
-        filtered_specs,
-        from_dt=_lookback_start(from_dt, parameter_ids),
-        to_dt=to_dt,
+    return _fetch_nve_timeseries_rows_for_sources(
+        hydapi_client, [source_id], parameter_ids, from_dt, to_dt,
     )
 
 
@@ -1406,18 +1417,23 @@ def _fetch_nve_timeseries_rows_for_sources(
     from_dt: datetime,
     to_dt: datetime,
 ) -> list[dict[str, Any]]:
-    series_specs = hydapi_client.fetch_series_specs_for_stations(source_ids)
-    if not series_specs:
-        return []
-    needed = set(parameter_ids)
-    if "precipitation_24h_rolling" in needed:
+    needed = set(parameter_ids) - {"discharge_hbv"}
+    if {"precipitation_24h_rolling", "precipitation_accumulated"} & needed:
         needed.add("precipitation_1h")
-    filtered_specs = [spec for spec in series_specs if spec.logical_element_id in needed]
-    return hydapi_client.fetch_observations_range(
-        filtered_specs,
-        from_dt=_lookback_start(from_dt, parameter_ids),
-        to_dt=to_dt,
-    )
+    rows = []
+    if needed:
+        series_specs = (
+            hydapi_client.fetch_series_specs_for_station(source_ids[0])
+            if len(source_ids) == 1 else hydapi_client.fetch_series_specs_for_stations(source_ids)
+        )
+        filtered_specs = [spec for spec in series_specs if spec.logical_element_id in needed]
+        rows.extend(hydapi_client.fetch_observations_range(
+            filtered_specs, from_dt=_lookback_start(from_dt, parameter_ids), to_dt=to_dt,
+        ))
+    if "discharge_hbv" in parameter_ids:
+        rows.extend(hydapi_client.veps_client.fetch_observations_range(source_ids, from_dt, to_dt))
+    return rows
+
 
 
 def _fetch_snower_timeseries_rows(
@@ -1529,6 +1545,8 @@ def _normalize_source_id(value: str | None) -> str:
 def _direct_observation_element_ids(parameter_ids: list[str]) -> set[str]:
     element_ids: set[str] = set()
     for parameter_id in parameter_ids:
+        if parameter_id == "discharge_hbv":
+            continue  # VEPS model parameter, never a Frost observation element.
         if parameter_id in {"precipitation_24h_rolling", "precipitation_accumulated"}:
             element_ids.update(PARAMETER_DEFINITIONS["precipitation_1h"]["element_ids"])
             continue
@@ -1565,6 +1583,8 @@ def _build_direct_series_payload(
         "unit": _series_unit(parameter_id, rows) or definition["unit"],
         "data": [_format_timeseries_point(point) for point in points],
     }
+    if parameter_id == "discharge_hbv":
+        payload.update({"data_type": "model", "model": "hf_hbv", "resolution": "P1D", "time_offset": "PT6H"})
     if parameter_id == "discharge":
         payload["thresholds"] = _timeseries_discharge_thresholds_payload(discharge_threshold)
         payload["percentiles"] = _timeseries_discharge_percentiles_payload(discharge_percentiles or [])
@@ -1610,7 +1630,9 @@ def _build_direct_points(
     points_by_time: dict[str, dict[str, Any]] = {}
     for row in sorted(rows, key=lambda item: item.get("referenceTime") or ""):
         reference_time = _parse_timestamp(row["referenceTime"])
-        if reference_time < from_dt or reference_time > min(to_dt, datetime.now(timezone.utc)):
+        if reference_time < from_dt or reference_time > (
+            to_dt if parameter_id == "discharge_hbv" else min(to_dt, datetime.now(timezone.utc))
+        ):
             continue
         for observation in row.get("observations", []):
             if observation.get("elementId") not in allowed:
@@ -2056,6 +2078,8 @@ def _sum_rows_in_window(rows: list[Observation], row_time: datetime, hours: int)
 
 
 def _matches_has_filter(has_filter: str, capability_flags: dict[str, bool], latest: StationLatest) -> bool:
+    if has_filter == "discharge_hbv":
+        return _hbv_latest_properties(latest)["has_discharge_hbv"]
     flag_name = _capability_flag_name(has_filter)
     if not flag_name:
         return False
@@ -2187,6 +2211,7 @@ def _compact_latest_properties(
         "wind_from_direction_observed_at": _isoformat(latest.wind_from_direction_observed_at),
         "wind_speed": latest.wind_speed,
         "wind_speed_observed_at": _isoformat(latest.wind_speed_observed_at),
+        **_hbv_latest_properties(latest),
         "discharge": latest.discharge,
         "discharge_observed_at": _isoformat(latest.discharge_observed_at),
         "groundwater_level": latest.groundwater_level,
@@ -2901,6 +2926,26 @@ def _latest_properties_for_station(station: Station, latest: StationLatest) -> d
     return properties
 
 
+def _hbv_latest_properties(latest: StationLatest) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    target = next_hbv_reference_time(now)
+    stamp = _ensure_utc(latest.discharge_hbv_forecast_time)
+    fetched_at = _ensure_utc(latest.discharge_hbv_fetched_at)
+    value = latest.discharge_hbv
+    valid = (stamp == target and fetched_at is not None and fetched_at <= now
+             and value is not None and math.isfinite(value) and value >= 0)
+    return {
+        "has_discharge_hbv": valid,
+        "discharge_hbv": value if valid else None,
+        "discharge_hbv_forecast_time": _isoformat(stamp) if valid else None,
+        "discharge_hbv_fetched_at": _isoformat(fetched_at) if valid else None,
+        "discharge_hbv_unit": "m3/s" if valid else None,
+        "discharge_hbv_model": "hf_hbv" if valid else None,
+        "discharge_hbv_resolution": "P1D" if valid else None,
+        "discharge_hbv_time_offset": "PT6H" if valid else None,
+    }
+
+
 def _latest_properties(latest: StationLatest) -> dict[str, Any]:
     return {
         "observed_at": _isoformat(latest.observed_at),
@@ -2943,6 +2988,7 @@ def _latest_properties(latest: StationLatest) -> dict[str, Any]:
         "wind_speed_max": latest.wind_speed_max,
         "wind_speed_max_unit": latest.wind_speed_max_unit,
         "wind_speed_max_time": latest.wind_speed_max_time,
+        **_hbv_latest_properties(latest),
         "discharge": latest.discharge,
         "discharge_unit": latest.discharge_unit,
         "discharge_observed_at": _isoformat(latest.discharge_observed_at),

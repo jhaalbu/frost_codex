@@ -8,6 +8,7 @@ from typing import Any
 
 import requests
 from requests import HTTPError
+from frost_sync.nve_veps import NveVepsClient
 
 
 AIR_TEMPERATURE_ELEMENT = "air_temperature"
@@ -87,9 +88,11 @@ class NveDischargeFloodThresholds:
 
 
 class NveHydApiClient:
-    def __init__(self, base_url: str, api_key: str, timeout_seconds: int = 60) -> None:
+    def __init__(self, base_url: str, api_key: str, timeout_seconds: int = 60,
+                 veps_base_url: str = "https://vepsapi.nve.no") -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.veps_client = NveVepsClient(veps_base_url, timeout_seconds)
         self._last_observations_call_at = 0.0
         self.session = requests.Session()
         self.session.trust_env = False

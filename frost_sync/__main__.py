@@ -62,6 +62,7 @@ def main() -> None:
             nve_hydapi_client = NveHydApiClient(
                 base_url=settings.nve_hydapi_base_url,
                 api_key=settings.nve_hydapi_key,
+                veps_base_url=settings.nve_veps_base_url,
                 timeout_seconds=settings.request_timeout_seconds,
             )
         snower_client = None
@@ -106,6 +107,7 @@ def main() -> None:
                 tilsig_client=tilsig_client,
                 wyssen_client=wyssen_client,
                 skred_client=skred_client,
+                veps_client=nve_hydapi_client.veps_client if nve_hydapi_client else None,
             )
             if args.command == "sync-metadata":
                 summary = service.sync_metadata(

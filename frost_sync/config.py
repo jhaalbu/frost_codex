@@ -22,6 +22,7 @@ class Settings:
     database_url: str = DEFAULT_DATABASE_URL
     frost_base_url: str = "https://frost.met.no"
     nve_hydapi_base_url: str = "https://hydapi.nve.no/api/v1"
+    nve_veps_base_url: str = "https://vepsapi.nve.no"
     snower_base_url: str = "https://app.snower.fi/api"
     tilsig_base_url: str = "https://api.tilsig.com"
     wyssen_base_url: str = "https://control.wyssenavalanche.com/app/api"
@@ -66,6 +67,7 @@ def load_settings() -> Settings:
         skred_api_token=skred_api_token,
         database_url=database_url,
         nve_hydapi_base_url=os.getenv("NVE_HYDAPI_BASE_URL", "https://hydapi.nve.no/api/v1").strip() or "https://hydapi.nve.no/api/v1",
+        nve_veps_base_url=os.getenv("NVE_VEPS_BASE_URL", "https://vepsapi.nve.no").strip() or "https://vepsapi.nve.no",
         snower_base_url=os.getenv("SNOWER_BASE_URL", "https://app.snower.fi/api").strip() or "https://app.snower.fi/api",
         tilsig_base_url=(os.getenv("TILSIG_BASE_URL","https://api.tilsig.com").strip() or "https://api.tilsig.com"),
         wyssen_base_url=(os.getenv("TILSIG_BASE_URL","https://control.wyssenavalanche.com/app/api").strip() or "https://control.wyssenavalanche.com/app/api"),

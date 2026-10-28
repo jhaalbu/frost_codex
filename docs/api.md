@@ -59,6 +59,8 @@ Historikk og tidsseriar krev anten `date=YYYY-MM-DD` eller både `from` og `to` 
 
 ## Tidsserierespons
 
+`discharge_hbv` kan plottast saman med `discharge`. HBV blir henta frå VEPS og er modellert døgnmiddel, også for framtidige tidspunkt. Alle latest-variantane har HBV-prognosen for neste døgn med eige prognosetidspunkt og hentetid. Sjå [HBV-kontrakten og døme](nve_hbv.md) for felt, døgnval og utrulling. Desse HBV-felta blir behaldne òg i FME og dei kompakte eksportane.
+
 Eitt-stasjonsruta returnerer denne forma (illustrativt datapunkt):
 
 ```json
@@ -103,7 +105,7 @@ Frost prioriterer timesaggregat, med tilbakefall til råmålingar som blir aggre
 | `has_*` | Kjend måleeigenskap, ikkje bevis på noverande verdi |
 | `null` / manglande felt i kompakt lag | Manglande/filtrert verdi; skal ikkje visast som `0` |
 
-Cachefilene blir serverte så lenge dei finst, utan alderskontroll. Ferskheitsfelta i filene blir ikkje rekna på nytt ved kvart kall. Respons bør berekne aktuell alder frå måletidspunkt og vise manglande/for gamle verdiar tydeleg. Sjudøgnslaget utelèt `has_recent_data`.
+Latest-cachefiler blir berre serverte når endringsdatoen er same norske kalenderdato som førespurnaden; elles blir responsen bygd frå databasen. Dette hindrar at gårsdagens «neste døgn»-prognose blir vist som morgondagens. Innanfor same dato blir ikkje ferskheitsfelta rekna på nytt ved kvart kall. Respons bør berekne aktuell alder frå måletidspunkt og vise manglande/for gamle verdiar tydeleg. Sjudøgnslaget utelèt `has_recent_data`.
 
 `daily_id` har forma `source_id_YYYYMMDD` og kan brukast ved FME append/update. Døgnet følgjer sommartid og kan ha 23 eller 25 timar. Sjudøgnsvindauget er relativt til byggetid for cachefila; utan cache er det relativt til førespurnaden.
 
@@ -111,7 +113,7 @@ Nedbørssummar og maksimum byggjer på tilgjengelege, godkjende målingar. Det f
 
 ## Cache og feil
 
-Latest-variantane og siste fullførte daily-periode blir normalt serverte frå fil. `X-GeoJSON-Cache` er `file`, `file-gzip` eller `database-fallback`. `Accept-Encoding: gzip` kan gi ferdigkomprimert fil. Filresponsar har HTTP-cache på 300 sekund. `has`-filter og eksplisitt daily-dato går direkte til databasen.
+Latest-variantane og siste fullførte daily-periode blir normalt serverte frå fil. `X-GeoJSON-Cache` er `file`, `file-gzip` eller `database-fallback`. `Accept-Encoding: gzip` kan gi ferdigkomprimert fil. Filresponsar har HTTP-cache på høgst 300 sekund, avgrensa til neste norske midnatt. `has`-filter og eksplisitt daily-dato går direkte til databasen.
 
 | Status | Typisk årsak |
 | --- | --- |

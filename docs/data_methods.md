@@ -1,137 +1,139 @@
-# Data methods and filters
+# Datametodar og filter
 
-Implementation notes for the stored observations and GeoJSON exports. For the API contract, see [API reference](api.md). Live timeseries do not apply every station-specific filter used by the stored map data; see the API reference before comparing the two.
+Dette dokumentet skildrar handsaminga av lagra observasjonar og GeoJSON-eksportar. Sjå [API-referansen](api.md) for klientkontrakten. Direkte tidsseriar brukar ikkje alle dei stasjonsspesifikke filtra som blir brukte på lagra kartdata; sjå API-referansen før du samanliknar dei to.
 
+Sjå [NVE-klassifisering og vassføringskurver](nve_discharge_classification.md) for omtale av vassføringskurver i HydAPI, persentilar og klassifiseringsfelt til symbolisering i ArcGIS/VertiGIS.
 
-See [nve_discharge_classification.md](nve_discharge_classification.md) for notes on HydAPI rating curves, percentiles and discharge classification fields for ArcGIS/VertiGIS symbolization.
+### Datakjelder
 
-### Providers
+Sjå [Datakjelder](providers.md) for alle dei seks leverandørane og korleis data frå dei blir mappa til felles felt.
 
-See [Datakjelder](providers.md) for all six providers and their current mappings.
+### Kvalitetsfilter
 
-### Quality filtering
+- Førespurnader til Frost brukar `FROST_QUALITY_CODES`, med standardverdien `0,1,2,3,4`.
+- Observasjonar med `quality_code >= 5` blir ikkje lagra når kvalitetskode er oppgitt.
+- `prune-db` slettar òg lagra observasjonar med `quality_code >= 5`.
+- Kvalitetsverdiar frå NVE og Snower blir lagra når dei er tilgjengelege. Manglande kvalitet er tillate, sidan ikkje alle leverandørresponsar brukar same modell for kvalitetskodar.
 
-- Frost requests use `FROST_QUALITY_CODES`, default `0,1,2,3,4`.
-- Observations with `quality_code >= 5` are skipped during storage when quality is present.
-- `prune-db` also deletes any stored observations with `quality_code >= 5`.
-- NVE and Snower quality values are stored when available, but missing quality is allowed because not all provider payloads use the same quality-code model.
+### Siste verdiar
 
-### Latest values
+- `station_latest` lagrar éi flat rad per stasjon til kartvising.
+- `observed_at` er observasjons-/referansetidspunktet frå leverandøren for det nyaste mappa elementet i rada. Feltet blir behalde som siste tidspunkt for heile stasjonen, av omsyn til kompatibilitet og generell vurdering av ferskheit.
+- Kvar primær måleverdi har òg sitt eige tidsstempel: `air_temperature_observed_at`, `precipitation_observed_at`, `snow_depth_observed_at`, `wind_speed_observed_at`, `wind_from_direction_observed_at`, `discharge_observed_at` og `groundwater_level_observed_at`. Bruk desse når alderen på ein bestemt verdi er viktig; parameterar på same stasjon kan bli oppdaterte til ulike tider.
+- `updated_at` er UTC-tidspunktet då den lokale `station_latest`-rada sist vart endra eller dei avleidde verdiane vart rekna ut på nytt. Feltet skildrar lokal handsaming, ikkje måletidspunktet, og kan derfor vere seinare enn `observed_at`.
+- `minutes_since_observation` blir ikkje lagra i databasen. Feltet blir rekna ut når GeoJSON-responsen eller cachefila blir bygd, som talet på heile minutt mellom gjeldande UTC-tid og `stations.last_observation_time`, som normalt svarar til `observed_at`. Verdien er `null` når måletidspunktet er ukjent.
+- `has_recent_data` blir rekna ut frå same måletidspunkt og er `true` når `minutes_since_observation` er høgst 120 minutt.
+- API-et returnerer tidsstempel i ISO 8601-format med UTC, til dømes `2026-08-05T12:00:00Z`.
+- Når `init-db` blir køyrd på nytt, legg kommandoen til manglande tidsstempelkolonnar for kvar parameter og fyller dei frå dei nyaste samsvarande radene som er behaldne i `observations`. Tidsstempelet blir verande `null` når det ikkje finst ei samsvarande historikkrad, og blir fylt ved ein seinare synk.
+- Felt som `has_air_temperature` og `has_snow_depth` kjem frå `station_capabilities`, ikkje frå om siste måleverdi er ulik `null`.
+- `parameter_profile` blir avleidd frå måleeigenskapane: `complete` tyder temperatur, nedbør, vind og snø; `weather` tyder temperatur, nedbør og vind; `snow` tyder at snødata er tilgjengelege; alle andre kombinasjonar får `lesser`.
 
-- `station_latest` stores one flattened row per station for map display.
-- `observed_at` is the provider's observation/reference time for the newest mapped element in the flattened row. It is kept as the station-wide latest time for compatibility and general station freshness.
-- Each primary latest value also has its own timestamp: `air_temperature_observed_at`, `precipitation_observed_at`, `snow_depth_observed_at`, `wind_speed_observed_at`, `wind_from_direction_observed_at`, `discharge_observed_at` and `groundwater_level_observed_at`. Use these fields when the age of an individual value matters; parameters on the same station can update at different times.
-- `updated_at` is the UTC time when the local `station_latest` row was last changed or its derived values were recalculated. It describes local processing, not when the station made an observation, and can therefore be later than `observed_at`.
-- `minutes_since_observation` is not stored in the database. It is calculated when the GeoJSON response or cache is built as the number of whole minutes between the current UTC time and `stations.last_observation_time`, which normally matches `observed_at`. It is `null` when no observation time is known.
-- `has_recent_data` is calculated from the same observation time and is `true` when `minutes_since_observation` is at most 120 minutes.
-- API timestamps are returned as ISO 8601 UTC values, for example `2026-08-05T12:00:00Z`.
-- Re-running `init-db` adds missing per-parameter timestamp columns and backfills them from the newest matching rows retained in `observations`. A timestamp remains `null` when no matching history row is available and is populated by a later sync.
-- Capability fields such as `has_air_temperature` and `has_snow_depth` come from `station_capabilities`, not from whether the latest value is non-null.
-- `parameter_profile` is derived from capabilities: `complete` means temperature, precipitation, wind and snow; `weather` means temperature, precipitation and wind; `snow` means snow is available; all other combinations are `lesser`.
+### Nedbørsfilter
 
-### Precipitation filters
+- Timesnedbør frå Frost og NVE blir normalisert til det logiske feltet `precipitation_1h`.
+- For NVE HydAPI-stasjonar blir `precipitation_1h < 0` og `precipitation_1h > 5 mm` rekna som mistenkjelege verdiar.
+- For vegstasjonar frå SVV/Statens vegvesen blir `precipitation_1h > 5 mm` rekna som mistenkjeleg, sidan optiske sensorar kan rapportere for mykje under snøfokk.
+- Mistenkjeleg nedbør blir utelaten frå siste nedbørsverdi og frå berekning av rullande summar og maksimum.
+- `is_precipitation_suspect` blir sett når den siste nedbørsobservasjonen på ein stasjon vart fjerna av dette filteret.
+- For `latest.7d.geojson` blir same strenge grense på 5 mm per time brukt for NVE og Vegvesen/SVV før maksimum og akkumulert nedbør blir rekna ut.
+- Stasjonane `2.36.0` og `SN11000` er utelatne frå timesnedbør fordi dei over tid har rapportert verdiar som ikkje oppfører seg som reell timesnedbør.
 
-- Frost and NVE hourly precipitation is normalized to the logical field `precipitation_1h`.
-- For NVE HydAPI stations, `precipitation_1h < 0` and `precipitation_1h > 5 mm` are treated as suspect.
-- For SVV/Statens vegvesen road stations, `precipitation_1h > 5 mm` is treated as suspect because optical sensors can over-report during blowing snow.
-- Suspect precipitation is excluded from the latest precipitation value and from rolling/max precipitation calculations.
-- `is_precipitation_suspect` is set when the latest precipitation observation for a station was removed by this filter.
-- For `latest.7d.geojson`, the same strict 5 mm hourly threshold is used for NVE and Vegvesen/SVV precipitation before calculating max and accumulated precipitation.
-- Known stations `2.36.0` and `SN11000` are excluded from hourly precipitation because they have consistently reported values that do not behave like real one-hour precipitation.
+### Snøfilter
 
-### Snow filters
+- Frost sitt `surface_snow_thickness`, NVE sitt `snow_depth` og snødjupn frå Snower blir normaliserte til det logiske feltet `snow_depth`.
+- Snøverdiar på `-1` blir normaliserte til `0`.
+- Snøverdiar `<= -3` blir forkasta.
+- For snødjupn frå NVE blir negative verdiar normaliserte til `0`, medan verdiar over `1000` blir forkasta som urealistiske.
+- `snow_depth_change` samanliknar siste snødjupn med den næraste observasjonen rundt 24 timar tidlegare, med eit søkjevindauge på sju dagar.
+- Dersom siste snødjupn er `0` og ingen snødjupn dei siste 24 timane er over `0`, blir `snow_depth_change` utelate.
 
-- Frost `surface_snow_thickness`, NVE `snow_depth` and Snower snow depth values are normalized to the logical field `snow_depth`.
-- Snow values of `-1` are normalized to `0`.
-- Snow values `<= -3` are discarded.
-- For NVE snow depth, negative values are normalized to `0`, while values above `1000` are discarded as unrealistic.
-- `snow_depth_change` compares the latest snow depth against the closest observation around 24 hours earlier, using a 7-day lookup window.
-- If latest snow depth is `0` and no recent snow depth in the last 24 hours is above `0`, `snow_depth_change` is omitted.
+### Temperaturfilter
 
-### Temperature filters
+- For SVV/Statens vegvesen-stasjonar blir lufttemperaturar frå `-40.5` til `-39.5` handsama som sensor-/feilkodar og utelatne frå siste verdiar og avleidde temperaturaggregat.
+- Lufttemperaturar nær `0` blir utelatne frå `station_latest` når naboverdiar i dei kringliggjande seks timane gjennomgåande ligg minst fem grader frå null på same side, når mønsteret i dei kringliggjande 24 timane er dominert av nøyaktige nullverdiar medan fleire verdiar på same side ligg langt frå null, eller når dei siste seks timane er ei flat rekkje med nullverdiar. Dette fjernar einskilde og gjentekne sensorutfall utan å filtrere bort vanleg vêr rundt frysepunktet.
+- Dersom den nyaste råverdien for lufttemperatur blir filtrert som mistenkjeleg, blir `latest.air_temperature` sett til `null` i staden for å bruke ein eldre gyldig temperatur.
 
-- For SVV/Statens vegvesen stations, air temperature values from `-40.5` to `-39.5` are treated as sensor/error codes and omitted from latest values and derived temperature aggregates.
-- Air temperature values close to `0` are omitted from `station_latest` when neighbouring values in the surrounding 6 hours are consistently at least `5` degrees away from zero on the same side, when the surrounding 24-hour pattern is dominated by exact zero values while several same-side non-zero values are far from zero, or when the last 6 hours are a flat run of zero values. This removes isolated and repeated sensor dropouts without filtering normal freezing-point weather.
-- If the newest raw air temperature value is filtered as suspect, `latest.air_temperature` is set to `null` instead of falling back to an older valid temperature.
+### HBV-modellert vassføring
 
-### Discharge classification
+`discharge_hbv` er eit eige VEPS-modellfelt med døgnmiddel for neste døgn i alle latest-variantane og direkte tidsseriar til graf. Det blir lagra separat frå observasjonane og inngår ikkje i observerte aggregat eller flaumklassifisering. Sjå [HBV-metode og døgnval](nve_hbv.md).
 
-- NVE HydAPI discharge is normalized to the logical field `discharge`.
-- `sync-metadata` fetches HydAPI `Percentiles` for NVE stations with discharge series and stores them in `nve_discharge_percentiles`.
-- `sync-metadata` also uses the HydAPI discharge series version to fetch Chartserver statistics `QCm`, `QC5` and `QC50`, stored as `discharge_flood_qm`, `discharge_flood_q5` and `discharge_flood_q50` thresholds.
-- Latest GeoJSON endpoints classify latest discharge against the percentile row for the observation date.
-- Flood thresholds take priority over percentiles: at or above `Q50` is `flood_over_50y`, at or above `Q5` is `flood_5y_to_50y`, and at or above `QM` is `flood_mean_to_5y`. Values below `QM`, or stations without flood thresholds, use the existing percentile classification.
-- Chartserver errors and missing series versions are handled per station; existing stored thresholds and percentile classification remain available.
-- The current percentile classes are `low`, `normal`, `high_minus`, `high` and `high_plus`.
-- Percentile bands are `< P25 = low`, `P25-P60 = normal`, `P60-P75 = high_minus`, `P75-P90 = high`, and `>= P90 = high_plus`. Flood classes override these bands when `QM`, `Q5` or `Q50` is reached.
-- This percentile classification is not the same as official NVE flood warning thresholds.
-- Run `init-db` once after deploying this change so the NVE percentile and flood-threshold tables exist, then run `sync-metadata` to populate them.
+### Klassifisering av vassføring
 
-### 24-hour derived fields
+- Vassføring frå NVE HydAPI blir normalisert til det logiske feltet `discharge`.
+- `sync-metadata` hentar HydAPI `Percentiles` for NVE-stasjonar med vassføringsseriar og lagrar dei i `nve_discharge_percentiles`.
+- `sync-metadata` brukar òg versjonen av vassføringsserien frå HydAPI til å hente Chartserver-statistikkane `QCm`, `QC5` og `QC50`. Desse blir lagra som tersklane `discharge_flood_qm`, `discharge_flood_q5` og `discharge_flood_q50`.
+- Latest-endepunkta for GeoJSON klassifiserer siste vassføring mot persentilrada for observasjonsdatoen.
+- Flaumtersklar har prioritet framfor persentilar: verdiar på eller over `Q50` får `flood_over_50y`, verdiar på eller over `Q5` får `flood_5y_to_50y`, og verdiar på eller over `QM` får `flood_mean_to_5y`. Verdiar under `QM`, eller stasjonar utan flaumtersklar, brukar persentilklassifiseringa.
+- Chartserver-feil og manglande serieversjonar blir handterte per stasjon; tidlegare lagra tersklar og persentilklassifisering er framleis tilgjengelege.
+- Persentilklassane er `low`, `normal`, `high_minus`, `high` og `high_plus`.
+- Persentilbanda er `< P25 = low`, `P25–P60 = normal`, `P60–P75 = high_minus`, `P75–P90 = high` og `>= P90 = high_plus`. Flaumklassane overstyrer desse banda når `QM`, `Q5` eller `Q50` er nådd.
+- Denne persentilklassifiseringa er ikkje det same som dei offisielle tersklane for flaumvarsling frå NVE.
+- Køyr `init-db` éin gong etter utrulling av denne funksjonen, slik at tabellane for NVE-persentilar og flaumtersklar finst. Køyr deretter `sync-metadata` for å fylle dei.
 
-- `precipitation_24h` is the sum of hourly precipitation rows in the last 24 hours before the station's latest observation time.
-- `precipitation_1h_max` is the largest accepted hourly precipitation value in that same 24-hour window.
-- `precipitation_1h_max_period` stores the one-hour period where that max occurred.
-- `precipitation_3h` is a rolling 3-hour sum ending at the station's latest observation time.
-- `precipitation_3h_max` is the largest rolling 3-hour sum in the last 24 hours.
-- `precipitation_3h_max_period` stores the 3-hour period where that max occurred.
-- `air_temperature_min` and `air_temperature_max` are min/max temperature over the latest 24-hour window. `air_temperature_min_time` and `air_temperature_max_time` store when those extremes occurred.
-- `wind_speed_max` is the largest wind speed over the latest 24-hour window, and `wind_from_direction_max` is the wind direction at that same timestamp when available.
+### Avleidde felt for siste 24 timar
 
-### 7-day GeoJSON method
+- `precipitation_24h` er summen av timesnedbørsrader dei siste 24 timane fram til siste måletidspunkt på stasjonen.
+- `precipitation_1h_max` er den største godkjende timesnedbørsverdien i same 24-timarsvindauge.
+- `precipitation_1h_max_period` lagrar éintimesperioden då maksimumsverdien vart målt.
+- `precipitation_3h` er ein rullande tretimarssum som sluttar ved siste måletidspunkt på stasjonen.
+- `precipitation_3h_max` er den største rullande tretimarssummen dei siste 24 timane.
+- `precipitation_3h_max_period` lagrar tretimarsperioden for denne maksimumssummen.
+- `air_temperature_min` og `air_temperature_max` er lågaste og høgaste temperatur i siste 24-timarsvindauge. `air_temperature_min_time` og `air_temperature_max_time` lagrar tidspunkta for desse ekstremverdiane.
+- `wind_speed_max` er den største vindfarten i siste 24-timarsvindauge, og `wind_from_direction_max` er vindretninga på nøyaktig same tidspunkt når ho er tilgjengeleg.
 
-- `latest.7d.geojson` is calculated from stored `observations`, not from `station_latest` columns.
-- Incoming observations with a timestamp later than the current UTC time are rejected. Air temperatures outside the inclusive range -60 to +60 degrees Celsius are rejected as well.
-- Exports also filter these invalid historical observations. Invalid cached latest values and future observation timestamps are suppressed; the observation history is not deleted. After deploying this change, run `python -m frost_sync refresh-geojson-cache` to replace existing cached exports, and reload the web application. Normal hourly sync also rebuilds the cache.
-- The time window is the last 7 days from payload build time: cache-generation time for file responses, or request time for database fallback.
-- It returns one feature per station only when at least one 7-day aggregate exists.
-- In normal operation, `run-hourly` pre-generates this endpoint as a cache file; the web route only rebuilds it from the database if the cache file is missing.
-- Maximum fields are named like `air_temperature_max_7d`, `snow_depth_max_7d`, `wind_speed_max_7d`, `wind_gust_max_7d`, `discharge_max_7d` and `groundwater_level_max_7d`.
-- Each max field also gets a timestamp field named `*_max_7d_time`.
-- Air temperature also exposes `air_temperature_min_7d` and `air_temperature_min_7d_time`.
-- `wind_direction_at_7dmax` is the wind direction observed at the exact timestamp of `wind_speed_max_7d`; it is omitted when no matching direction observation exists.
-- For discharge, the 7-day endpoint keeps only `discharge_max_7d`, `discharge_max_7d_time` and `discharge_class`. The class is calculated from `discharge_max_7d`, using the daily percentiles for `discharge_max_7d_time` and the stored flood thresholds.
-- `latest.7d.geojson` omits `has_recent_data`; `minutes_since_observation` remains available.
-- `precipitation_7d_accumulated` is the sum of accepted hourly precipitation values in the 7-day window.
-- `precipitation_24h_max` is the largest rolling 24-hour precipitation sum whose end time falls within the 7-day window, and `precipitation_24h_max_time` is that end time. The calculation reads an extra 24 hours before the 7-day window so the first rolling windows are complete; that lookback is not included in `precipitation_7d_accumulated` or other 7-day maxima.
-- Because this endpoint reads from `observations`, at least 7 days of retained observations are needed for the ordinary 7-day aggregates. Use at least 8 days for `precipitation_24h_max`, which also needs the preceding 24-hour lookback. Retention alone does not guarantee complete sampling or backfill missing history.
+### Metode for sjudøgns-GeoJSON
 
-### Daily GeoJSON method
+- `latest.7d.geojson` blir rekna ut frå lagra `observations`, ikkje frå kolonnane i `station_latest`.
+- Innkomande observasjonar med tidsstempel seinare enn gjeldande UTC-tid blir avviste. Lufttemperaturar utanfor det inklusive intervallet −60 til +60 grader Celsius blir òg avviste.
+- Eksportane filtrerer òg bort slike ugyldige historiske observasjonar. Ugyldige mellomlagra sisteverdiar og framtidige måletidspunkt blir undertrykte; observasjonshistorikken blir ikkje sletta. Etter utrulling av denne endringa: køyr `python -m frost_sync refresh-geojson-cache` for å erstatte eksisterande eksportfiler, og last webappen på nytt. Den vanlege timejobben byggjer òg cachefilene på nytt.
+- Tidsvindauget er dei siste sju døgna rekna frå tidspunktet då responsen blir bygd: tidspunktet for cachebygging ved filrespons, eller tidspunktet for førespurnaden ved tilbakefall til databasen.
+- Responsen inneheld éin feature per stasjon når minst eitt sjudøgnsaggregat eller ein gyldig HBV-prognose for morgondagen finst.
+- Ved vanleg drift byggjer `run-hourly` dette endepunktet på førehand som ei cachefil. Webruta byggjer det berre på nytt frå databasen dersom cachefila manglar.
+- Maksimumsfelta har namn som `air_temperature_max_7d`, `snow_depth_max_7d`, `wind_speed_max_7d`, `wind_gust_max_7d`, `discharge_max_7d` og `groundwater_level_max_7d`.
+- Kvart maksimumsfelt har òg eit tidsstempelfelt med namnet `*_max_7d_time`.
+- Lufttemperatur har i tillegg `air_temperature_min_7d` og `air_temperature_min_7d_time`.
+- `wind_direction_at_7dmax` er vindretninga målt på nøyaktig same tidspunkt som `wind_speed_max_7d`. Feltet blir utelate dersom det ikkje finst ei samsvarande retningsmåling.
+- For vassføring beheld sjudøgnsendepunktet berre `discharge_max_7d`, `discharge_max_7d_time` og `discharge_class`. Klassen blir rekna ut frå `discharge_max_7d`, med døgnpersentilane for `discharge_max_7d_time` og dei lagra flaumtersklane.
+- `latest.7d.geojson` utelèt `has_recent_data`; `minutes_since_observation` er framleis tilgjengeleg.
+- `precipitation_7d_accumulated` er summen av godkjende timesnedbørsverdiar i sjudøgnsvindauget.
+- `precipitation_24h_max` er den største rullande 24-timars nedbørssummen med sluttid innanfor sjudøgnsvindauget, og `precipitation_24h_max_time` er denne sluttida. Berekninga les 24 timar ekstra før sjudøgnsvindauget, slik at dei første rullande vindauga er komplette. Dette tilbakeblikket inngår ikkje i `precipitation_7d_accumulated` eller andre sjudøgnsmaksimum.
+- Sidan endepunktet les frå `observations`, trengst minst sju dagar med lagra observasjonar for dei vanlege sjudøgnsaggregata. Bruk minst åtte dagar for `precipitation_24h_max`, som òg treng dei føregåande 24 timane. Lagringstid åleine garanterer ikkje komplett måledekning og fyller ikkje inn manglande historikk.
 
-- `daily.geojson` is intended for a daily FME append/update into an ArcGIS history layer. It returns one feature per station with a stable `daily_id` in the form `source_id_YYYYMMDD`.
-- A reporting day runs from 06:00 on `period_date` up to, but not including, 06:00 the next day in the `Europe/Oslo` time zone. This remains correct across daylight-saving transitions. `period_start` and `period_end` are returned as UTC timestamps.
-- Without a date parameter, the endpoint returns the latest completed 06:00–06:00 period and normally uses the pre-generated cache. Use `?date=YYYY-MM-DD` to rebuild a specific retained period directly from the database.
-- The schema is stable: fields without observations are retained as `null`, which makes it suitable for FME and a fixed ArcGIS feature-service schema.
-- Temperature includes daily minimum and maximum with timestamps. Other measurement types expose only maximum values with timestamps. Wind direction is included at the exact time of maximum wind speed when available.
-- `precipitation_24h` is the accepted hourly precipitation sum for the reporting period. The endpoint also includes the largest 1-hour and rolling 3-hour precipitation values and their accumulation end times.
-- `discharge_class` is calculated from `discharge_max`, using percentiles for the date of that maximum and stored `QM`, `Q5` and `Q50` thresholds.
-- The endpoint reads from retained `observations`; a historical date older than `FROST_RETENTION_DAYS` can therefore contain null measurement fields.
+### Metode for døgn-GeoJSON
 
-### Compact GeoJSON method
+- `daily.geojson` er meint for dagleg innlegging eller oppdatering via FME i eit ArcGIS-historikklag. Responsen inneheld éin feature per stasjon med ein stabil `daily_id` på forma `source_id_YYYYMMDD`.
+- Eit rapporteringsdøgn går frå kl. 06:00 på `period_date` fram til, men ikkje med, kl. 06:00 neste dag i tidssona `Europe/Oslo`. Dette blir handtert korrekt ved overgang mellom sommartid og normaltid. `period_start` og `period_end` blir returnerte som UTC-tidsstempel.
+- Utan datoparameter returnerer endepunktet siste fullførte kl. 06–06-periode og brukar normalt den ferdigbygde cachefila. Bruk `?date=YYYY-MM-DD` for å byggje ein bestemt periode som framleis er lagra, direkte frå databasen.
+- Skjemaet er stabilt: felt utan observasjonar blir behaldne som `null`, slik at responsen passar til FME og eit fast feltskjema i ei ArcGIS-featureteneste.
+- Temperatur har døgnminimum og -maksimum med tidsstempel. Andre måletypar har berre maksimumsverdiar med tidsstempel. Vindretning blir teken med på nøyaktig tidspunkt for maksimal vindfart når ho er tilgjengeleg.
+- `precipitation_24h` er summen av godkjend timesnedbør i rapporteringsperioden. Endepunktet inneheld òg største timesnedbør og største rullande tretimarsnedbør med sluttid for akkumuleringa.
+- `discharge_class` blir rekna ut frå `discharge_max`, med persentilar for datoen for maksimumet og lagra tersklar for `QM`, `Q5` og `Q50`.
+- Endepunktet les frå observasjonar som framleis finst i `observations`. Ein historisk dato som er eldre enn `FROST_RETENTION_DAYS`, kan derfor ha målefelt med `null`.
 
-- `latest.compact.geojson` keeps the same station filtering as `latest.geojson`, but removes capability flags, coordinate properties, unit fields and all null values.
-- `latest.7d.geojson` uses the same compact style so it can be added directly to an ArcGIS web map with less payload overhead.
-- Both compact endpoints keep coordinates only in GeoJSON geometry.
-- Both compact endpoints are served from pre-generated files when those files exist in `FROST_GEOJSON_CACHE_DIR`.
-- The web response includes `X-GeoJSON-Cache`; expected values are `file-gzip`, `file` or `database-fallback`.
+### Metode for kompakt GeoJSON
 
-### Timeseries method
+- `latest.compact.geojson` brukar same stasjonsfiltrering som `latest.geojson`, men fjernar flagg for måleeigenskapar, koordinatfelt i properties, einingsfelt og alle nullverdiar.
+- `latest.7d.geojson` brukar same kompakte utforming, slik at laget kan leggjast direkte til eit ArcGIS-webkart med mindre datamengd.
+- Begge dei kompakte endepunkta beheld koordinatar berre i GeoJSON-geometrien.
+- Begge blir serverte frå ferdigbygde filer når filene finst i `FROST_GEOJSON_CACHE_DIR`.
+- Webresponsen inneheld `X-GeoJSON-Cache`; venta verdiar er `file-gzip`, `file` eller `database-fallback`.
 
-- `/api/stations/<source_id>/timeseries` and `/api/timeseries` fetch plotting data directly from the provider instead of reading historical observations from the local database.
-- The API resolves provider from `source_id`, so the client does not need to send provider in the request.
-- Frost and NVE requests are batched by provider for `/api/timeseries`.
-- Frost timeseries prefers hourly elements such as `mean(air_temperature PT1H)`, `mean(wind_speed PT1H)`, `mean(wind_from_direction PT1H)` and `max(wind_speed_of_gust PT1H)`.
-- If preferred Frost hourly elements are not available, raw values are fetched and aggregated to hourly points in the API response.
-- `precipitation_24h_rolling` is derived from provider hourly precipitation values.
-- `precipitation_accumulated` accumulates precipitation through the requested time range.
+### Metode for tidsseriar
 
-### Retention and scheduled jobs
+- `/api/stations/<source_id>/timeseries` og `/api/timeseries` hentar grafdata direkte frå leverandøren i staden for å lese historiske observasjonar frå den lokale databasen.
+- API-et slår opp leverandøren frå `source_id`, så klienten treng ikkje sende leverandør i førespurnaden.
+- Førespurnader til Frost og NVE blir samla per leverandør for `/api/timeseries`.
+- Frost-tidsseriar prioriterer timeselement som `mean(air_temperature PT1H)`, `mean(wind_speed PT1H)`, `mean(wind_from_direction PT1H)` og `max(wind_speed_of_gust PT1H)`.
+- Dersom dei prioriterte timeselementa ikkje er tilgjengelege frå Frost, blir råverdiar henta og aggregerte til timepunkt i API-responsen.
+- `precipitation_24h_rolling` blir avleidd frå leverandøren sine timesnedbørsverdiar.
+- `precipitation_accumulated` summerer nedbør gjennom det etterspurde tidsrommet.
 
-- `run-hourly` updates observations and `station_latest`, but does not prune old observations.
-- `run-hourly` also refreshes cached `latest.geojson`, `latest.fme.geojson`, `latest.compact.geojson`, `latest.7d.geojson` and `daily.geojson` files after the database commit.
-- `sync-metadata` refreshes station metadata and capabilities and should run daily or when provider configuration changes.
-- `prune-db` deletes observations older than `FROST_RETENTION_DAYS` and bad-quality rows.
-- The default retention is 14 days, which is enough for 24-hour latest fields and the 7-day GeoJSON endpoint.
-- `refresh-geojson-cache` rebuilds the cached latest GeoJSON files, including gzip-compressed `.gz` variants.
-- `FROST_GEOJSON_CACHE_DIR` controls where pre-generated GeoJSON files are stored. Relative paths are resolved from the project root.
+### Lagringstid og planlagde jobbar
 
+- `run-hourly` oppdaterer observasjonar og `station_latest`, men slettar ikkje gamle observasjonar.
+- `run-hourly` oppdaterer òg cachefilene `latest.geojson`, `latest.fme.geojson`, `latest.compact.geojson`, `latest.7d.geojson` og `daily.geojson` etter at databasetransaksjonen er stadfesta (commit).
+- `sync-metadata` oppdaterer stasjonsmetadata og måleeigenskapar og bør køyrast dagleg eller når leverandøroppsettet blir endra.
+- `prune-db` slettar observasjonar som er eldre enn `FROST_RETENTION_DAYS`, og rader med dårleg kvalitet.
+- Standard lagringstid er 14 dagar. Dette er nok for sisteverdiar med 24-timarsaggregat og sjudøgnsendepunktet for GeoJSON.
+- `refresh-geojson-cache` byggjer dei mellomlagra GeoJSON-filene på nytt, inkludert gzip-komprimerte `.gz`-variantar.
+- `FROST_GEOJSON_CACHE_DIR` styrer kvar ferdigbygde GeoJSON-filer blir lagra. Relative stiar blir tolka ut frå prosjektroten.
