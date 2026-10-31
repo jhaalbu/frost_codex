@@ -10,6 +10,7 @@ from flask_caching import Cache
 from flask_cors import CORS
 
 from frost_sync.config import load_settings, require_frost_client_id
+from frost_sync.auth import install_api_key_auth
 from frost_sync.web import create_blueprint
 
 
@@ -21,6 +22,7 @@ FROST_SOURCES_URL = "https://frost.met.no/sources/v0.jsonld"
 def create_app() -> Flask:
     settings = load_settings()
     app = Flask(__name__)
+    install_api_key_auth(app, settings.proxy_api_key)
     CORS(app)
 
     app.config["CACHE_TYPE"] = os.getenv("CACHE_TYPE", "SimpleCache")

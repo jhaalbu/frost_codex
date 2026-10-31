@@ -190,7 +190,7 @@ class HbvIntegrationTest(unittest.TestCase):
             NveHydApiSeriesSpec("12.215.0", "1001", "discharge", 0, "m3/s")]
         hydapi.fetch_observations_range.return_value = [observed, future_observed]
         hydapi.veps_client.fetch_observations_range.return_value = [model_row()]
-        settings = Settings(None, "test", None, None)
+        settings = Settings(None, "test", None, None, proxy_api_key="test-proxy-key")
         with patch.object(web, "load_settings", return_value=settings), \
              patch.object(web, "create_session_factory", return_value=self.factory), \
              patch.object(web, "NveHydApiClient", return_value=hydapi), \
@@ -198,6 +198,7 @@ class HbvIntegrationTest(unittest.TestCase):
             clock.now.return_value = NOW
             app = web.create_app()
             client = app.test_client()
+            client.environ_base["HTTP_X_API_KEY"] = "test-proxy-key"
             args = "parameters=discharge,discharge_hbv&from=2026-10-28T00:00:00Z&to=2026-10-30T00:00:00Z"
             single = client.get("/api/stations/12.215.0/timeseries?" + args)
             self.assertEqual(single.status_code, 200)

@@ -13,6 +13,7 @@ from sqlalchemy import and_, select
 
 from frost_sync.quality import sanitize_latest, valid_observation, valid_temperature
 from frost_sync.config import Settings, load_settings
+from frost_sync.auth import install_api_key_auth
 from frost_sync.db import create_session_factory
 from frost_sync.frost_api import FrostClient
 from frost_sync.models import (
@@ -141,6 +142,8 @@ def create_app() -> Flask:
 
 def create_blueprint(name: str = "frost_sync") -> Blueprint:
     settings = load_settings()
+    blueprint = Blueprint(name, __name__)
+    install_api_key_auth(blueprint, settings.proxy_api_key)
     session_factory = create_session_factory(settings.database_url)
     frost_client = FrostClient(
         base_url=settings.frost_base_url,
@@ -174,7 +177,6 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
         base_url=settings.skred_base_url,
         timeout_seconds=settings.request_timeout_seconds,
     ) if settings.skred_api_token else None
-    blueprint = Blueprint(name, __name__)
 
     @blueprint.get("/health")
     def health() -> Any:

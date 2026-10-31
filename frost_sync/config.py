@@ -35,6 +35,7 @@ class Settings:
     snow_lookback_hours: int = 48
     acceptable_quality_codes: str = "0,1,2,3,4"
     geojson_cache_dir: str = "geojson_cache"
+    proxy_api_key: str | None = None
 
 
 def load_settings() -> Settings:
@@ -66,6 +67,7 @@ def load_settings() -> Settings:
         wyssen_api_key=wyssen_api_key,
         skred_api_token=skred_api_token,
         database_url=database_url,
+        proxy_api_key=os.getenv("PROXY_API_KEY", "").strip() or None,
         nve_hydapi_base_url=os.getenv("NVE_HYDAPI_BASE_URL", "https://hydapi.nve.no/api/v1").strip() or "https://hydapi.nve.no/api/v1",
         nve_veps_base_url=os.getenv("NVE_VEPS_BASE_URL", "https://vepsapi.nve.no").strip() or "https://vepsapi.nve.no",
         snower_base_url=os.getenv("SNOWER_BASE_URL", "https://app.snower.fi/api").strip() or "https://app.snower.fi/api",

@@ -10,6 +10,7 @@ Sjå [README](../README.md) for lokal oppstart. Dette er driftsrutinar for imple
 | --- | --- |
 | `DATABASE_URL` | `sqlite:///frost_local.db`; SQLite for lokal bruk, MySQL kan brukast i produksjon |
 | `FROST_CLIENT_ID` | Påkravd for `app.py` og CLI-jobbane for metadata, timejobb og rydding |
+| `PROXY_API_KEY` | Påkravd for alle weboppsett; klienten sender verdien i `X-API-Key`. Sjå [proxy-nøkkel](proxy_auth.md) |
 | `NVE_HYDAPI_KEY` | Aktiverer NVE |
 | `SNOWER_API_KEY` | `snk_`-nøkkel; erstattar eldre brukarnamn/passord |
 | `SNOWER_DOMAIN_ID` | Set til t.d. `frost-sync`. CLI krev verdi for å opprette Snower-klienten; webdelen har tilbakefall til `frost-sync` |

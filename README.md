@@ -16,6 +16,7 @@ Kart og graf kan vise ulike verdiar og ulik datadekning. Eit nytt kartkall garan
 | [API-referanse](docs/api.md) | Endepunkt, prefiks, parameterar, responsformat og feil |
 | [Datakjelder](docs/providers.md) | Autentisering, stasjons-ID-ar og kva integrasjonane leverer |
 | [Drift og oppsett](docs/operations.md) | Oppstart, miljøvariablar, PythonAnywhere og feilsøking |
+| [Proxy-nøkkel](docs/proxy_auth.md) | Påkravd `X-API-Key`, klientoppsett og nøkkelbyte |
 | [Datametodar](docs/data_methods.md) | Kvalitetsfilter, nedbør, snø, døgn- og sjudøgnsberekningar |
 | [NVE-klassifisering](docs/nve_discharge_classification.md) | Vassføring, persentilar og flaumklassar |
 | [HBV-vassføring](docs/nve_hbv.md) | Modellserie til graf og prognose for neste døgn i latest-kartlaga |
@@ -35,6 +36,7 @@ Opprett `.env` i prosjektroten med nøklar for kjeldene du har tilgang til:
 
 ```dotenv
 FROST_CLIENT_ID=your-client-id
+PROXY_API_KEY=your-own-random-proxy-key
 DATABASE_URL=sqlite:///frost_local.db
 NVE_HYDAPI_KEY=your-nve-key
 SNOWER_API_KEY=snk_your-key
@@ -52,6 +54,8 @@ flask --app app run --host 127.0.0.1 --port 5000
 ```
 
 Med denne oppstarten ligg kartlaget på `/weather/api/stations/latest.geojson` og parameterkatalogen på `/weather/api/parameters`. `python -m frost_sync serve` eksponerer blueprint-rutene utan `/weather`.
+
+Dei fire `latest*.geojson`-rutene er opne utan nøkkel. Tidsseriar og andre datakall, inkludert daily/historikk, krev `X-API-Key` med verdien frå `PROXY_API_KEY`. Webappen nektar å starte utan ein konfigurert proxy-nøkkel. Sjå [tilgangsoppsettet](docs/proxy_auth.md) før utrulling.
 
 `sync-metadata`, `run-hourly` og `prune-db` krev i dagens CLI at `FROST_CLIENT_ID` er sett, også når andre kjelder er konfigurerte.
 

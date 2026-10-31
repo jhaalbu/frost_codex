@@ -10,7 +10,7 @@ Referansen skildrar koden per 2026-10-28. Eksempla er illustrative og er ikkje p
 | `python -m frost_sync serve` / `frost_sync.web.create_app()` | Ingen prefiks |
 | Eiga Flask-app | Prefikset brukt ved registrering av `create_blueprint()` |
 
-Alle rutene under brukar `GET`. Med standard `app.py` blir til dømes `/api/parameters` til `/weather/api/parameters`. Responsane brukar ikkje innkommande API-nøkkel eller brukarinnlogging i denne koden. `app.py` aktiverer CORS; den frittståande blueprint-appen gjer ikkje det.
+Alle rutene under brukar `GET`. Med standard `app.py` blir til dømes `/api/parameters` til `/weather/api/parameters`. Dei fire `latest*.geojson`-rutene er opne, inkludert `?has=...`. Tidsseriar og andre dataruter, inkludert daily og historikk, krev `X-API-Key` med verdien frå `PROXY_API_KEY`. Manglande/feil nøkkel på ei verna rute gir `401`. Sjå [proxy-nøkkel og klientoppsett](proxy_auth.md). Health-rutene og CORS-`OPTIONS` er opne. `app.py` aktiverer CORS; den frittståande blueprint-appen gjer ikkje det.
 
 ## Endepunkt
 
@@ -113,16 +113,17 @@ Nedbørssummar og maksimum byggjer på tilgjengelege, godkjende målingar. Det f
 
 ## Cache og feil
 
-Latest-variantane og siste fullførte daily-periode blir normalt serverte frå fil. `X-GeoJSON-Cache` er `file`, `file-gzip` eller `database-fallback`. `Accept-Encoding: gzip` kan gi ferdigkomprimert fil. Filresponsar har HTTP-cache på høgst 300 sekund, avgrensa til neste norske midnatt. `has`-filter og eksplisitt daily-dato går direkte til databasen.
+Latest-variantane og siste fullførte daily-periode blir normalt serverte frå fil. `X-GeoJSON-Cache` er `file`, `file-gzip` eller `database-fallback`. `Accept-Encoding: gzip` kan gi ferdigkomprimert fil. Autentiserte dataresponsar får `Cache-Control: private, no-store`; serveren brukar framleis dei lokale cachefilene etter godkjend nøkkelkontroll. `has`-filter og eksplisitt daily-dato går direkte til databasen.
 
 | Status | Typisk årsak |
 | --- | --- |
+| `401` | Manglande eller feil proxy-nøkkel i `X-API-Key` |
 | `400` | Manglande tidsrom/stasjonsliste, ukjend parameter, ugyldig dato på daily-ruta |
 | `404` | Ukjend stasjon eller manglande NVE-tersklar |
 | `502` | Handtert `RuntimeError` frå direkte eitt-stasjons tidsseriekall |
 | `500` | Uhandtert feil; mellom anna er ikkje all ugyldig tidsinput eller alle transportfeil fanga opp |
 
-Feilformatet er ikkje einsarta JSON; `abort()` brukar Flask sitt standardformat. API-et har ikkje full validering av rekkjefølgja eller lengda på tidsrom. Sjå [oppfølgingspunkta](review-2026-10-28.md).
+Nøkkelavvising (`401`) er JSON. Andre feilformat er ikkje einsarta JSON; `abort()` brukar Flask sitt standardformat. API-et har ikkje full validering av rekkjefølgja eller lengda på tidsrom. Sjå [oppfølgingspunkta](review-2026-10-28.md).
 
 ## Eldre Frost-proxyruter i app.py
 
