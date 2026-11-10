@@ -73,8 +73,10 @@ class SnowerClient:
         Rate limiter held det under 60/min, men køyr dette i sync-metadata, ikkje kvar time.
         """
         items = self._post("/monitors_list", {"format": "extended"})
+        if not isinstance(items, list):
+            raise RuntimeError("Uventa format frå Snower monitors_list")
         monitors: list[SnowerMonitor] = []
-        for item in items or []:
+        for item in items:
             if not isinstance(item, dict):
                 continue
             permanent_id = str(item.get("permanent_id") or "").strip()
@@ -84,7 +86,7 @@ class SnowerClient:
             monitor_body = {"monitor": permanent_id}
             try:
                 status = self._post("/monitor_active_status", monitor_body)
-                if not bool(status.get("active_status")):
+                if not isinstance(status, dict) or status.get("active_status") is not True:
                     continue
                 location = self._post("/monitor_location", monitor_body).get("location", {}) or {}
             except SnowerAuthError:

@@ -66,11 +66,14 @@ class ProxyAuthTest(unittest.TestCase):
         self.assertEqual(client.get("/custom/api/parameters", headers={"X-API-Key": KEY}).status_code, 200)
 
     def test_latest_gzip_file_and_conditional_requests_are_public(self):
-        with TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder:
-            path = Path(folder) / "latest.geojson"
+        with TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder, \
+             patch.object(web, "_active_snower_ids", return_value=set()):
+            settings = self.settings(geojson_cache_dir=folder)
+            path = web._geojson_cache_dir(settings, set()) / "latest.geojson"
+            path.parent.mkdir()
             path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
             path.with_suffix(".geojson.gz").write_bytes(b"test-compressed-payload")
-            client = self.make_app(self.settings(geojson_cache_dir=folder)).test_client()
+            client = self.make_app(settings).test_client()
             headers = {"Accept-Encoding": "gzip"}
             response = client.get("/api/stations/latest.geojson", headers=headers)
             self.assertEqual(response.status_code, 200)

@@ -250,16 +250,18 @@ class HbvMigrationAndCacheTest(unittest.TestCase):
 
     def test_cache_from_previous_norwegian_date_is_bypassed_including_gzip(self):
         with TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder:
-            path = Path(folder) / "latest.geojson"
+            settings = Settings(None, None, None, None, geojson_cache_dir=folder)
+            path = web._geojson_cache_dir(settings, set()) / "latest.geojson"
+            path.parent.mkdir()
             path.write_text('{}', encoding="utf-8")
             path.with_suffix('.geojson.gz').write_bytes(b'old')
             os.utime(path, (NOW.timestamp() - 86400,) * 2)
-            settings = Settings(None, None, None, None, geojson_cache_dir=folder)
             app = Flask(__name__)
             with app.test_request_context(headers={"Accept-Encoding": "gzip"}), \
-                 patch("frost_sync.web.datetime", wraps=datetime) as clock:
+                 patch("frost_sync.web.datetime", wraps=datetime) as clock, \
+                 patch.object(web, "_active_snower_ids", return_value=set()):
                 clock.now.return_value = NOW
-                self.assertIsNone(web._cached_geojson_response(settings, "latest.geojson"))
+                self.assertIsNone(web._cached_geojson_response(settings, "latest.geojson", None))
 
 
 if __name__ == "__main__":

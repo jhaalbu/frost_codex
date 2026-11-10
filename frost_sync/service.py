@@ -221,7 +221,7 @@ class SyncService:
 
         snower_station_count = 0
         snower_monitors = self._load_snower_monitors_from_db()
-        if snower_monitors:
+        if self.snower_client is not None and snower_monitors:
             try:
                 snower_station_count = len(snower_monitors)
                 snower_stations_by_source = {
@@ -756,14 +756,16 @@ class SyncService:
 
     def _upsert_snower_stations(self, monitors: Iterable[SnowerMonitor]) -> None:
         now = datetime.now(timezone.utc)
-        source_ids = [monitor.source_id for monitor in monitors]
-        if not source_ids:
-            return
+        monitors = list(monitors)
+        active_ids = {monitor.source_id for monitor in monitors}
 
         existing = self.session.execute(
-            select(Station).where(Station.source_id.in_(source_ids))
+            select(Station).where((Station.provider == "snower") | Station.source_id.in_(active_ids))
         ).scalars().all()
         existing_by_source = {station.source_id: station for station in existing}
+        for station in existing:
+            if station.provider == "snower":
+                station.snower_active = station.source_id in active_ids
 
         for source in monitors:
             station = existing_by_source.get(source.source_id)
@@ -773,6 +775,7 @@ class SyncService:
                 existing_by_source[source.source_id] = station
 
             station.provider = "snower"
+            station.snower_active = True
             station.provider_context = source.provider_context
             station.name = source.name
             station.stationholder = "Snower"
@@ -899,7 +902,7 @@ class SyncService:
     def _load_snower_monitors_from_db(self) -> list[SnowerMonitor]:
         monitors: list[SnowerMonitor] = []
         stations = self.session.execute(
-            select(Station).where(Station.provider == "snower")
+            select(Station).where(Station.provider == "snower", Station.snower_active.is_(True))
         ).scalars()
         for station in stations:
             if not station.provider_context:

@@ -35,6 +35,8 @@ def upgrade_schema(database_url: str) -> None:
             ddl_statements.append("ALTER TABLE stations ADD COLUMN provider_context VARCHAR(2048)")
         if "stationholder" not in station_columns:
             ddl_statements.append("ALTER TABLE stations ADD COLUMN stationholder VARCHAR(512)")
+        if "snower_active" not in station_columns:
+            ddl_statements.append("ALTER TABLE stations ADD COLUMN snower_active BOOLEAN")
 
     if "nve_discharge_percentiles" in tables:
         percentile_columns = {

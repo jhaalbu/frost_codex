@@ -25,7 +25,9 @@ HBV-modellert vassføring blir i tillegg henta frå VEPS som eigen parameter `di
 
 Klienten brukar den konfigurerte `snk_`-nøkkelen i `authentication-key`, saman med `domain-id`. Brukarnamn/passord og `/login` er ikkje del av implementasjonen.
 
-Metadata blir henta via `monitors_list`, `monitor_active_status` og `monitor_location`. Berre aktive monitorar blir tekne med. Etter migrering frå eldre Snower-oppsett må `sync-metadata` køyrast for å lagre `permanent_id` i `provider_context`.
+Metadata blir henta via `monitors_list`, `monitor_active_status` og `monitor_location`. Berre monitorar med den boolske verdien `active_status: true` som metadatajobben klarer å hente, blir synlege i API-et. Jobben oppdaterer òg statusen for tidlegare lagra stasjonar. Når ein stasjon fell ut av den aktive lista, blir han skjult frå både kartlag og historikkruter. Målingane blir behaldne etter dei vanlege reglane for lagringstid.
+
+Etter oppgradering må `init-db` køyrast før `sync-metadata` fyller status for eksisterande stasjonar. Snower-stasjonar med ukjend status er skjulte. Når den aktive lista endrar seg, brukar webappen ei tilsvarande cachemappe eller byggjer svaret frå databasen. Køyr `refresh-geojson-cache` for å byggje filene straks, eller lat neste timejobb gjere det.
 
 Synken hentar `last_reading`. Grafar brukar `readings_list`, med handtering av leverandøren sine avkortingsheaderar og inntil 20 pagineringsrundar. Historikk kan derfor vere kortare enn perioden klienten bad om. Avkortinga blir logga, men er ikkje eit eige felt i tidsserieresponsen.
 

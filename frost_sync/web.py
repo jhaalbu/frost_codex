@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
 import gzip
+from hashlib import sha256
 import json
 import math
 from pathlib import Path
@@ -134,6 +135,10 @@ DAILY_AGGREGATE_ELEMENT_IDS = {
 
 EXCLUDED_PRECIPITATION_SOURCE_IDS = {"2.36.0", "SN11000"}
 
+# Unknown status includes Snower rows created before active status was stored.
+VISIBLE_STATION = (Station.provider != "snower") | Station.snower_active.is_(True)
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
     app.register_blueprint(create_blueprint())
@@ -186,7 +191,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
     def latest_geojson() -> Any:
         has_filter = request.args.get("has")
         if not has_filter:
-            cached_response = _cached_geojson_response(settings, "latest.geojson")
+            cached_response = _cached_geojson_response(settings, "latest.geojson", session_factory)
             if cached_response is not None:
                 return cached_response
         response = jsonify(build_latest_geojson(session_factory, has_filter=has_filter))
@@ -195,7 +200,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
 
     @blueprint.get("/api/stations/latest.compact.geojson")
     def latest_compact_geojson() -> Any:
-        cached_response = _cached_geojson_response(settings, "latest.compact.geojson")
+        cached_response = _cached_geojson_response(settings, "latest.compact.geojson", session_factory)
         if cached_response is not None:
             return cached_response
         response = jsonify(build_latest_compact_geojson(session_factory))
@@ -204,7 +209,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
 
     @blueprint.get("/api/stations/latest.fme.geojson")
     def latest_fme_geojson() -> Any:
-        cached_response = _cached_geojson_response(settings, "latest.fme.geojson")
+        cached_response = _cached_geojson_response(settings, "latest.fme.geojson", session_factory)
         if cached_response is not None:
             return cached_response
         response = jsonify(build_latest_fme_geojson(session_factory))
@@ -213,7 +218,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
 
     @blueprint.get("/api/stations/latest.7d.geojson")
     def latest_7d_geojson() -> Any:
-        cached_response = _cached_geojson_response(settings, "latest.7d.geojson")
+        cached_response = _cached_geojson_response(settings, "latest.7d.geojson", session_factory)
         if cached_response is not None:
             return cached_response
         response = jsonify(build_latest_7d_geojson(session_factory))
@@ -224,7 +229,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
     def daily_geojson() -> Any:
         date_arg = request.args.get("date")
         if not date_arg:
-            cached_response = _cached_geojson_response(settings, "daily.geojson")
+            cached_response = _cached_geojson_response(settings, "daily.geojson", session_factory)
             if cached_response is not None:
                 return cached_response
         try:
@@ -248,6 +253,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                         and_(
                             Observation.reference_time >= from_dt,
                             Observation.reference_time <= to_dt,
+                            VISIBLE_STATION,
                         )
                     )
                     .order_by(Observation.reference_time, Station.source_id, Observation.element_id)
@@ -293,7 +299,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                 session.execute(
                     select(Station, StationLatest)
                     .outerjoin(StationLatest, StationLatest.station_id == Station.id)
-                    .where(Station.source_id == source_id)
+                    .where(Station.source_id == source_id, VISIBLE_STATION)
                 )
                 .one_or_none()
             )
@@ -331,7 +337,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                         NveDischargeFloodThreshold,
                         NveDischargeFloodThreshold.station_id == Station.id,
                     )
-                    .where(Station.source_id == source_id)
+                    .where(Station.source_id == source_id, VISIBLE_STATION)
                 )
                 .one_or_none()
             )
@@ -359,7 +365,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
 
         with session_factory() as session:
             station = (
-                session.execute(select(Station).where(Station.source_id == source_id))
+                session.execute(select(Station).where(Station.source_id == source_id, VISIBLE_STATION))
                 .scalar_one_or_none()
             )
             if station is None:
@@ -427,7 +433,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
 
         with session_factory() as session:
             stations = (
-                session.execute(select(Station).where(Station.source_id.in_(source_ids)))
+                session.execute(select(Station).where(Station.source_id.in_(source_ids), VISIBLE_STATION))
                 .scalars()
                 .all()
             )
@@ -472,7 +478,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
 
         with session_factory() as session:
             station = (
-                session.execute(select(Station).where(Station.source_id == source_id))
+                session.execute(select(Station).where(Station.source_id == source_id, VISIBLE_STATION))
                 .scalar_one_or_none()
             )
             if station is None:
@@ -524,6 +530,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
 def refresh_geojson_cache(settings: Settings | None = None) -> dict[str, Path]:
     settings = settings or load_settings()
     session_factory = create_session_factory(settings.database_url)
+    active_snower_ids = _active_snower_ids(session_factory)
     payloads = {
         "latest.geojson": build_latest_geojson(session_factory),
         "latest.fme.geojson": build_latest_fme_geojson(session_factory),
@@ -532,10 +539,17 @@ def refresh_geojson_cache(settings: Settings | None = None) -> dict[str, Path]:
         "daily.geojson": build_daily_geojson(session_factory),
     }
 
-    cache_dir = _geojson_cache_dir(settings)
+    cache_dir = _geojson_cache_dir(settings, active_snower_ids)
     cache_dir.mkdir(parents=True, exist_ok=True)
     written: dict[str, Path] = {}
     for filename, payload in payloads.items():
+        # Keep cache contents within the active set captured for this directory,
+        # even if metadata changes while the different payloads are built.
+        payload["features"] = [
+            feature for feature in payload["features"]
+            if feature["properties"]["provider"] != "snower"
+            or feature["properties"]["source_id"] in active_snower_ids
+        ]
         path = cache_dir / filename
         tmp_path = path.with_suffix(path.suffix + ".tmp")
         content = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -555,6 +569,7 @@ def build_latest_geojson(session_factory, has_filter: str | None = None) -> dict
             session.execute(
                 select(Station, StationLatest)
                 .join(StationLatest, StationLatest.station_id == Station.id)
+                .where(VISIBLE_STATION)
                 .order_by(Station.source_id)
             )
             .all()
@@ -607,6 +622,7 @@ def build_latest_compact_geojson(session_factory) -> dict[str, Any]:
             session.execute(
                 select(Station, StationLatest)
                 .join(StationLatest, StationLatest.station_id == Station.id)
+                .where(VISIBLE_STATION)
                 .order_by(Station.source_id)
             )
             .all()
@@ -710,6 +726,7 @@ def build_latest_7d_geojson(session_factory) -> dict[str, Any]:
             session.execute(
                 select(Station, StationLatest)
                 .join(StationLatest, StationLatest.station_id == Station.id)
+                .where(VISIBLE_STATION)
                 .order_by(Station.source_id)
             )
             .all()
@@ -813,6 +830,7 @@ def build_daily_geojson(
             session.execute(
                 select(Station, StationLatest)
                 .join(StationLatest, StationLatest.station_id == Station.id)
+                .where(VISIBLE_STATION)
                 .order_by(Station.source_id)
             )
             .all()
@@ -937,8 +955,8 @@ def _daily_window(
     return period_date, start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
 
-def _cached_geojson_response(settings: Settings, filename: str) -> Any | None:
-    path = _geojson_cache_dir(settings) / filename
+def _cached_geojson_response(settings: Settings, filename: str, session_factory) -> Any | None:
+    path = _geojson_cache_dir(settings, _active_snower_ids(session_factory)) / filename
     if not path.exists():
         return None
 
@@ -968,11 +986,20 @@ def _cached_geojson_response(settings: Settings, filename: str) -> Any | None:
     return response
 
 
-def _geojson_cache_dir(settings: Settings) -> Path:
+def _active_snower_ids(session_factory) -> set[str]:
+    with session_factory() as session:
+        return set(session.scalars(
+            select(Station.source_id).where(Station.provider == "snower", Station.snower_active.is_(True))
+        ))
+
+
+def _geojson_cache_dir(settings: Settings, active_snower_ids: set[str]) -> Path:
     path = Path(settings.geojson_cache_dir)
-    if path.is_absolute():
-        return path
-    return Path(__file__).resolve().parent.parent / path
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent.parent / path
+    # Old files and files from another active set must never bypass the filter.
+    key = sha256(json.dumps(sorted(active_snower_ids)).encode("utf-8")).hexdigest()
+    return path / f"snower-active-{key}"
 
 
 def _resolve_time_range() -> tuple[datetime, datetime]:

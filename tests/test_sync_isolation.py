@@ -41,6 +41,7 @@ class SyncIsolationTest(unittest.TestCase):
         with Session(engine, expire_on_commit=False) as session:
             station = Station(source_id="SN123", provider="frost", last_seen_at=now)
             session.add_all([station, Station(source_id="snower-test", provider="snower",
+                                             snower_active=True,
                                              provider_context="{}", last_seen_at=now)])
             session.flush()
             session.add(StationCapability(station_id=station.id, element_id="air_temperature",
