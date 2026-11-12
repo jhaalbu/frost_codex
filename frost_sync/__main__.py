@@ -110,11 +110,7 @@ def main() -> None:
                 veps_client=nve_hydapi_client.veps_client if nve_hydapi_client else None,
             )
             if args.command == "sync-metadata":
-                summary = service.sync_metadata(
-                    page_limit=settings.page_limit,
-                    source_batch_size=settings.source_batch_size,
-                    snow_lookback_hours=settings.snow_lookback_hours,
-                )
+                summary = service.sync_metadata(page_limit=settings.page_limit)
             elif args.command == "prune-db":
                 observations_deleted = service.prune_observations(settings.retention_days)
                 print(f"Prune finished. observations_deleted={observations_deleted}")

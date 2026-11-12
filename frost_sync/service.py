@@ -130,7 +130,7 @@ class SyncService:
             capabilities_updated += metadata_summary.capabilities_updated
             stations_by_source = self._load_stations_by_provider("frost")
 
-        capability_source_ids = self._load_capability_source_ids("frost", set(TARGET_ELEMENTS))
+        capability_source_ids = self._load_capability_source_ids("frost", set(TARGET_ELEMENTS) | SNOW_DEPTH_ELEMENT_IDS)
         frost_station_count = len(stations_by_source)
 
         observable_source_ids = [
@@ -142,18 +142,6 @@ class SyncService:
                 if element_id not in SNOW_DEPTH_ELEMENT_IDS
             )
         ]
-        snow_source_ids = sorted(
-            {
-                *capability_source_ids.get(SURFACE_SNOW_THICKNESS_ELEMENT, set()),
-                *capability_source_ids.get(SNOW_DEPTH_ELEMENT, set()),
-            }
-        )
-        if not snow_source_ids:
-            logger.info("No Frost snow capabilities found; checking all Frost stations once.")
-            snow_source_ids = sorted(stations_by_source)
-
-        snow_capable_source_ids: set[str] = set()
-
         batch_written, batch_latest, batch_errors = self._sync_observation_batches(
             stations_by_source=stations_by_source,
             source_ids=observable_source_ids,
@@ -164,27 +152,25 @@ class SyncService:
         station_errors += batch_errors
         stage_started = _log_sync_stage("Frost latest", stage_started)
 
+        try:
+            snow_series_ids = self.frost_client.fetch_snow_series_ids(lookback_hours=snow_lookback_hours)
+            snow_source_ids = {_normalize_source_id(series_id) for series_id in snow_series_ids}
+        except Exception as exc:
+            logger.warning("Frost snow series discovery failed; using stored snow capabilities: %s", exc)
+            snow_source_ids = (
+                capability_source_ids[SURFACE_SNOW_THICKNESS_ELEMENT] | capability_source_ids[SNOW_DEPTH_ELEMENT]
+            )
+
         snow_written, snow_latest, snow_errors = self._sync_snow_observations(
             stations_by_source=stations_by_source,
-            source_ids=snow_source_ids,
+            source_ids=sorted(snow_source_ids.intersection(stations_by_source)),
             source_batch_size=source_batch_size,
             lookback_hours=snow_lookback_hours,
-            snow_capable_source_ids=snow_capable_source_ids,
         )
         observations_written += snow_written
         latest_updated += snow_latest
         station_errors += snow_errors
         stage_started = _log_sync_stage("Frost snow", stage_started)
-
-        for source_id in snow_capable_source_ids:
-            station = stations_by_source.get(source_id)
-            if station is None:
-                continue
-            capabilities_updated += self._upsert_capabilities_for_elements(
-                station=station,
-                tracked_elements=SNOW_DEPTH_ELEMENT_IDS,
-                available_elements={SURFACE_SNOW_THICKNESS_ELEMENT},
-            )
 
         nve_station_count = 0
         nve_series_specs: list[NveHydApiSeriesSpec] = []
@@ -413,12 +399,7 @@ class SyncService:
         logger.info("VEPS HBV next day: updated=%s errors=%s target=%s", updated, errors, target)
         return updated, errors
 
-    def sync_metadata(
-        self,
-        page_limit: int,
-        source_batch_size: int = 100,
-        snow_lookback_hours: int = 48,
-    ) -> SyncSummary:
+    def sync_metadata(self, page_limit: int) -> SyncSummary:
         sources = self.frost_client.fetch_sources(page_limit=page_limit)
         stations_by_source = self._upsert_stations(sources)
         capabilities_updated = 0
@@ -433,41 +414,12 @@ class SyncService:
             available_elements = {
                 element_id
                 for element_id, source_ids in capability_source_ids.items()
-                if source.source_id in source_ids and element_id not in SNOW_DEPTH_ELEMENT_IDS
+                if source.source_id in source_ids
             }
             capabilities_updated += self._upsert_capabilities_for_elements(
                 station=station,
                 tracked_elements=set(TARGET_ELEMENTS),
                 available_elements=available_elements,
-            )
-
-        snow_capable_source_ids: set[str] = set()
-        source_ids = [source.source_id for source in sources]
-        for source_batch in _chunked(source_ids, source_batch_size):
-            try:
-                snow_series_ids = self.frost_client.fetch_snow_series_ids(
-                    source_batch,
-                    lookback_hours=snow_lookback_hours,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to refresh Frost snow metadata for batch of %s sources. First source=%s. Error=%s",
-                    len(source_batch),
-                    source_batch[0] if source_batch else None,
-                    exc,
-                )
-                station_errors += len(source_batch)
-                continue
-            snow_capable_source_ids.update(_normalize_source_id(series_id) for series_id in snow_series_ids)
-
-        for source_id in snow_capable_source_ids:
-            station = stations_by_source.get(source_id)
-            if station is None:
-                continue
-            capabilities_updated += self._upsert_capabilities_for_elements(
-                station=station,
-                tracked_elements=SNOW_DEPTH_ELEMENT_IDS,
-                available_elements={SURFACE_SNOW_THICKNESS_ELEMENT},
             )
 
         nve_station_count = 0
@@ -596,7 +548,6 @@ class SyncService:
         source_ids: list[str],
         source_batch_size: int,
         lookback_hours: int,
-        snow_capable_source_ids: set[str],
     ) -> tuple[int, int, int]:
         written = 0
         latest = 0
@@ -604,11 +555,7 @@ class SyncService:
 
         for source_batch in _chunked(source_ids, source_batch_size):
             try:
-                snow_series_ids = self.frost_client.fetch_snow_series_ids(source_batch, lookback_hours=lookback_hours)
-                if not snow_series_ids:
-                    continue
-                snow_capable_source_ids.update(_normalize_source_id(series_id) for series_id in snow_series_ids)
-                snow_rows = self.frost_client.fetch_recent_snow_observations(snow_series_ids, lookback_hours=lookback_hours)
+                snow_rows = self.frost_client.fetch_recent_snow_observations(source_batch, lookback_hours=lookback_hours)
                 batch_written, batch_latest = self._store_observations_batch(stations_by_source, snow_rows)
                 self.session.commit()
                 written += batch_written
@@ -1410,7 +1357,6 @@ class SyncService:
                         [
                             *sorted(PRECIPITATION_ELEMENT_IDS),
                             AIR_TEMPERATURE_ELEMENT,
-                            *sorted(SNOW_DEPTH_ELEMENT_IDS),
                             WIND_SPEED_ELEMENT,
                             WIND_DIRECTION_ELEMENT,
                         ]
@@ -1434,29 +1380,32 @@ class SyncService:
             and not _is_suspect_road_station_temperature(station, row.value)
         ]
         temperature_rows = _filter_suspect_air_temperature_rows(station, raw_temperature_rows)
-        snow_depth_rows = sorted(
-            [row for row in rows if row.element_id in SNOW_DEPTH_ELEMENT_IDS and row.value is not None],
-            key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
-        )
-        snow_observed_at = (
-            _ensure_utc(snow_depth_rows[-1].reference_time) if snow_depth_rows else None
-        )
+        snow_observed_at = _ensure_utc(latest.snow_depth_observed_at)
+        snow_window_end = snow_observed_at or observed_at
         snow_change_rows = (
             self.session.execute(
                 select(Observation).where(
                     Observation.station_id == station.id,
-                    Observation.reference_time >= (snow_observed_at or observed_at) - timedelta(days=7),
-                    Observation.reference_time <= (snow_observed_at or observed_at),
+                    Observation.reference_time >= snow_window_end - timedelta(days=7),
+                    Observation.reference_time <= snow_window_end,
                     Observation.element_id.in_(sorted(SNOW_DEPTH_ELEMENT_IDS)),
-                )
+                    Observation.value.is_not(None),
+                    Observation.quality_code.is_(None) | (Observation.quality_code < 5),
+                ).order_by(Observation.reference_time, Observation.id)
             )
             .scalars()
             .all()
         )
-        snow_change_rows = sorted(
-            [row for row in snow_change_rows if row.value is not None],
-            key=lambda row: _ensure_utc(row.reference_time) or datetime.min.replace(tzinfo=timezone.utc),
-        )
+        if snow_change_rows:
+            latest_snow_row = snow_change_rows[-1]
+            latest_snow_time = _ensure_utc(latest_snow_row.reference_time)
+            if latest.snow_depth is None or snow_observed_at is None:
+                # Recover rows whose snow value was cleared by the station's old 24-hour window.
+                latest.snow_depth = latest_snow_row.value
+                latest.snow_depth_unit = latest_snow_row.unit
+                latest.snow_depth_observed_at = latest_snow_time
+            elif latest_snow_time != snow_observed_at:
+                snow_change_rows = []
         wind_speed_rows = [row for row in rows if row.element_id == WIND_SPEED_ELEMENT and row.value is not None]
         wind_direction_rows = {
             _ensure_utc(row.reference_time): row
@@ -1505,9 +1454,6 @@ class SyncService:
                 else None
             )
 
-        latest_snow_row = snow_depth_rows[-1] if snow_depth_rows else None
-        latest.snow_depth = latest_snow_row.value if latest_snow_row else None
-        latest.snow_depth_unit = latest_snow_row.unit if latest_snow_row else None
         latest.snow_depth_change = _snow_depth_change(snow_change_rows)
         latest.snow_depth_change_unit = _first_unit(snow_change_rows) if latest.snow_depth_change is not None else None
 

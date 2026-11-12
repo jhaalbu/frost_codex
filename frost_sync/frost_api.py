@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -150,35 +151,39 @@ class FrostClient:
             },
         )
 
-    def fetch_snow_series_ids(self, source_ids: list[str], lookback_hours: int) -> list[str]:
-        referencetime = _recent_range_hours(lookback_hours)
+    def fetch_snow_series_ids(self, lookback_hours: int) -> list[str]:
         data = self._get(
             "/observations/availableTimeSeries/v0.jsonld",
             {
-                "sources": ",".join(source_ids),
-                "referencetime": referencetime,
+                "referencetime": _recent_range_hours(lookback_hours),
                 "elements": "surface_snow_thickness",
-                "timeresolutions": "PT1H",
-                "timeoffsets": "PT0H",
+                "timeoffsets": "default",
                 "levels": "default",
+                "fields": "sourceId",
             },
         )
         return sorted({item["sourceId"] for item in data if item.get("sourceId")})
 
-    def fetch_recent_snow_observations(self, series_ids: list[str], lookback_hours: int) -> list[dict[str, Any]]:
-        if not series_ids:
+    def fetch_recent_snow_observations(self, source_ids: list[str], lookback_hours: int) -> list[dict[str, Any]]:
+        if not source_ids:
             return []
-        return self._get(
+        rows = self._get(
             "/observations/v0.jsonld",
             {
-                "sources": ",".join(series_ids),
+                "sources": ",".join(source_ids),
                 "referencetime": _recent_range_hours(lookback_hours),
                 "elements": "surface_snow_thickness",
-                "timeresolutions": "PT1H",
-                "timeoffsets": "PT0H",
+                "timeoffsets": "default",
+                "levels": "default",
                 "qualities": self.acceptable_quality_codes,
             },
         )
+        for row in rows:
+            observations = row.get("observations", [])
+            if len(observations) > 1:
+                # One value is stored per timestamp. Apply the finest valid measurement last.
+                observations.sort(key=_subdaily_resolution_seconds, reverse=True)
+        return rows
 
     def _source_query_params(self, element_id: str | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {
@@ -202,6 +207,15 @@ class FrostClient:
         if element_id:
             params["elements"] = element_id
         return params
+
+
+def _subdaily_resolution_seconds(observation: dict[str, Any]) -> float:
+    resolution = observation.get("timeResolution") or ""
+    match = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?", resolution)
+    if match is None:
+        return float("inf")
+    hours, minutes, seconds = match.groups(default="0")
+    return 3600 * int(hours) + 60 * int(minutes) + float(seconds)
 
 
 def _parse_datetime(value: str | None) -> datetime | None:

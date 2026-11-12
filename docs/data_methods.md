@@ -41,6 +41,8 @@ Sjå [Datakjelder](providers.md) for alle dei seks leverandørane og korleis dat
 ### Snøfilter
 
 - Frost sitt `surface_snow_thickness`, NVE sitt `snow_depth` og snødjupn frå Snower blir normaliserte til det logiske feltet `snow_depth`.
+- Timejobben finn tilgjengelege Frost-snøseriar og hentar målingar med standard tidsforskyving for kvar målefrekvens. Dersom fleire godkjende målingar har same referansetid, blir den med finast tidsoppløysing lagra.
+- `station_latest` beheld siste gyldige snødjupn med sitt eige måletidspunkt. Bruk `snow_depth_observed_at` til å vurdere ferskheita.
 - Snøverdiar på `-1` blir normaliserte til `0`.
 - Snøverdiar `<= -3` blir forkasta.
 - For snødjupn frå NVE blir negative verdiar normaliserte til `0`, medan verdiar over `1000` blir forkasta som urealistiske.
