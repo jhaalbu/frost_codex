@@ -11,6 +11,7 @@ from requests import HTTPError
 
 TARGET_ELEMENTS = [
     "air_temperature",
+    "surface_temperature",
     "sum(precipitation_amount PT1H)",
     "surface_snow_thickness",
     "wind_from_direction",
@@ -19,6 +20,7 @@ TARGET_ELEMENTS = [
 
 LATEST_SYNC_ELEMENTS = [
     "air_temperature",
+    "surface_temperature",
     "sum(precipitation_amount PT1H)",
     "wind_from_direction",
     "wind_speed",

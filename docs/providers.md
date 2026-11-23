@@ -1,12 +1,12 @@
 # Datakjelder
 
-Dette dokumentet skildrar integrasjonane slik dei er kopla i koden per 2026-10-28. Tilgang og datadekning hos leverandøren er ikkje verifisert med produksjonskall i denne gjennomgangen.
+Dette dokumentet skildrar integrasjonane i koden, med overflatetemperatur oppdatert 2026-11-23. Overflatetemperatur er kontrollert med levande Frost- og Snower-kall; dei andre kjeldene er ikkje verifiserte med produksjonskall i denne gjennomgangen.
 
 | Kjelde / `provider` | `source_id` | Aktivering | Data i vanleg synk |
 | --- | --- | --- | --- |
-| MET Frost / `frost` | T.d. `SN18700` | `FROST_CLIENT_ID` | Temperatur, timesnedbør, snødjupn, vind og vindkast der stasjonen har desse |
+| MET Frost / `frost` | T.d. `SN18700` | `FROST_CLIENT_ID` | Luft- og overflatetemperatur, timesnedbør, snødjupn, vind og vindkast der stasjonen har desse |
 | NVE / `nve_hydapi` | T.d. `84.21.0` | `NVE_HYDAPI_KEY` | Utvalde seriar, mellom anna vassføring, grunnvatn, snø og nedbør |
-| Snower / `snower` | `SNWR-<permanent_id>` | `SNOWER_API_KEY` og, for CLI-synk, `SNOWER_DOMAIN_ID` | `snow_depth` og `probe_temperature` mappa til `air_temperature` |
+| Snower / `snower` | `SNWR-<permanent_id>` | `SNOWER_API_KEY` og, for CLI-synk, `SNOWER_DOMAIN_ID` | `snow_depth`, `probe_temperature` → `air_temperature`, `ir_temperature` → `surface_temperature` |
 | Tilsig / `tilsig` | `TILSIG-<station_id>` | `TILSIG_API_KEY` | Berre godkjende Snow Depth Mode-seriar → `snow_depth` |
 | Wyssen / `wyssen` | `WYSSEN-<station_id>` | `WYSSEN_API_KEY` | `MTA` → temperatur, `MWS` → vindfart, `MWD` → vindretning |
 | Skred AS / `skred` | `SKRED-cs001` | `SKRED_API_TOKEN` | Temperatur, vindfart og vindretning frå Vikafjell |
@@ -31,7 +31,15 @@ Etter oppgradering må `init-db` køyrast før `sync-metadata` fyller status for
 
 Synken hentar `last_reading`. Grafar brukar `readings_list`, med handtering av leverandøren sine avkortingsheaderar og inntil 20 pagineringsrundar. Historikk kan derfor vere kortare enn perioden klienten bad om. Avkortinga blir logga, men er ikkje eit eige felt i tidsserieresponsen.
 
-`probe_temperature` er mappa til `air_temperature` i koden. Måleplasseringa må takast med i tolkinga av temperaturen. `snow_on_road` er ikkje mappa til snødjupn. Manglande sensorverdi blir ikkje gjort om til måleverdien `0`.
+`probe_temperature` er mappa til `air_temperature` i koden. Måleplasseringa må takast med i tolkinga av temperaturen. `ir_temperature` er mappa til `surface_temperature` i både `last_reading` og `readings_list`. Feltnamnet er kontrollert mot Snower si [eiga webapp](https://app.snower.fi/) og levande API-responsar 2026-11-23. API-et leverer eininga `Celsius`, som blir normalisert til `degC`. `snow_on_road` er ikkje mappa til snødjupn. Manglande sensorverdi blir ikkje gjort om til måleverdien `0`.
+
+Levande kontroll 2026-11-23 omfatta tre aktive stasjonar: Bjorli flypass, Ev6 Hatter og Ev6 Karlebotn. `last_reading` og seks timar med `readings_list` gav overflatetemperatur på alle tre (29 historikkpunkt totalt). Innlasting i ein database i minnet, latest/full/compact/FME, `has=surface_temperature`, sjudøgnsekstrem og begge HTTP-tidsserierutene vart kontrollerte. Latest lagrar måletid med sekundoppløysing; den direkte tidsserien beheld leverandøren si tidsoppløysing. Kontrollen endra ikkje prosjektet sin database eller produksjonsdata.
+
+### Overflatetemperatur frå Frost og Snower
+
+Felles parameternamn er `surface_temperature`, i `degC`. [Frost sin elementkatalog](https://frost.met.no/elements/v0.jsonld?ids=surface_temperature) stadfestar at dette er den gamle MET-koden `TSS`, med målehøgd 0 m og skildringa «snow surface or bare ground» (kontrollert med autentisert kall 2026-11-23). Snower brukar den infraraude sensoren `ir_temperature`.
+
+Frost-metadata og timesynk inkluderer `surface_temperature`. Snower ber om `ir_temperature` saman med dei andre sisteverdiane; capability blir sett når observasjonar kjem inn. Manglande sensor/data gir ingen observasjon. Overflatetemperatur på 0 °C er gyldig, også på vegstasjonar. Det eigne nullfilteret for lufttemperatur blir ikkje brukt på overflatetemperatur.
 
 ## Tilsig
 

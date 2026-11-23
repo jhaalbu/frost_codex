@@ -19,7 +19,7 @@ Sjå [Datakjelder](providers.md) for alle dei seks leverandørane og korleis dat
 
 - `station_latest` lagrar éi flat rad per stasjon til kartvising.
 - `observed_at` er observasjons-/referansetidspunktet frå leverandøren for det nyaste mappa elementet i rada. Feltet blir behalde som siste tidspunkt for heile stasjonen, av omsyn til kompatibilitet og generell vurdering av ferskheit.
-- Kvar primær måleverdi har òg sitt eige tidsstempel: `air_temperature_observed_at`, `precipitation_observed_at`, `snow_depth_observed_at`, `wind_speed_observed_at`, `wind_from_direction_observed_at`, `discharge_observed_at` og `groundwater_level_observed_at`. Bruk desse når alderen på ein bestemt verdi er viktig; parameterar på same stasjon kan bli oppdaterte til ulike tider.
+- Kvar primær måleverdi har òg sitt eige tidsstempel: `air_temperature_observed_at`, `surface_temperature_observed_at`, `precipitation_observed_at`, `snow_depth_observed_at`, `wind_speed_observed_at`, `wind_from_direction_observed_at`, `discharge_observed_at` og `groundwater_level_observed_at`. Bruk desse når alderen på ein bestemt verdi er viktig; parameterar på same stasjon kan bli oppdaterte til ulike tider.
 - `updated_at` er UTC-tidspunktet då den lokale `station_latest`-rada sist vart endra eller dei avleidde verdiane vart rekna ut på nytt. Feltet skildrar lokal handsaming, ikkje måletidspunktet, og kan derfor vere seinare enn `observed_at`.
 - `minutes_since_observation` blir ikkje lagra i databasen. Feltet blir rekna ut når GeoJSON-responsen eller cachefila blir bygd, som talet på heile minutt mellom gjeldande UTC-tid og `stations.last_observation_time`, som normalt svarar til `observed_at`. Verdien er `null` når måletidspunktet er ukjent.
 - `has_recent_data` blir rekna ut frå same måletidspunkt og er `true` når `minutes_since_observation` er høgst 120 minutt.
@@ -94,6 +94,7 @@ Sjå [Datakjelder](providers.md) for alle dei seks leverandørane og korleis dat
 - Maksimumsfelta har namn som `air_temperature_max_7d`, `snow_depth_max_7d`, `wind_speed_max_7d`, `wind_gust_max_7d`, `discharge_max_7d` og `groundwater_level_max_7d`.
 - Kvart maksimumsfelt har òg eit tidsstempelfelt med namnet `*_max_7d_time`.
 - Lufttemperatur har i tillegg `air_temperature_min_7d` og `air_temperature_min_7d_time`.
+- Overflatetemperatur har `surface_temperature_min_7d` og `surface_temperature_max_7d`, med tilhøyrande `*_time`. Han følgjer dei felles temperaturgrensene −60 til 60 °C og kontrollen mot framtidige tidspunkt. Lufttemperaturen sitt stasjonsspesifikke nullfilter blir ikkje brukt på overflatetemperatur.
 - `wind_direction_at_7dmax` er vindretninga målt på nøyaktig same tidspunkt som `wind_speed_max_7d`. Feltet blir utelate dersom det ikkje finst ei samsvarande retningsmåling.
 - For vassføring beheld sjudøgnsendepunktet berre `discharge_max_7d`, `discharge_max_7d_time` og `discharge_class`. Klassen blir rekna ut frå `discharge_max_7d`, med døgnpersentilane for `discharge_max_7d_time` og dei lagra flaumtersklane.
 - `latest.7d.geojson` utelèt `has_recent_data`; `minutes_since_observation` er framleis tilgjengeleg.

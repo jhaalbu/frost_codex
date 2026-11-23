@@ -13,9 +13,11 @@ logger = logging.getLogger(__name__)
 
 SNOWER_SNOW_DEPTH_ELEMENT = "snow_depth"
 SNOWER_PROBE_TEMPERATURE_ELEMENT = "probe_temperature"
+SNOWER_SURFACE_TEMPERATURE_ELEMENT = "ir_temperature"
 SNOWER_TO_LOGICAL_ELEMENT = {
     SNOWER_SNOW_DEPTH_ELEMENT: "snow_depth",
     SNOWER_PROBE_TEMPERATURE_ELEMENT: "air_temperature",
+    SNOWER_SURFACE_TEMPERATURE_ELEMENT: "surface_temperature",
 }
 # NB: "snow_on_road" er IKKJE snødjupn lenger (sidan 1.10.2026: snø etter brøyting, cm, berre vegpar).
 

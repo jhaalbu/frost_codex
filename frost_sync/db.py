@@ -54,6 +54,9 @@ def upgrade_schema(database_url: str) -> None:
     columns = {column["name"] for column in inspector.get_columns("station_latest")}
 
     expected_columns = {
+        "surface_temperature": "FLOAT",
+        "surface_temperature_unit": "VARCHAR(64)",
+        "surface_temperature_observed_at": "DATETIME",
         "air_temperature_observed_at": "DATETIME",
         "air_temperature_min": "FLOAT",
         "air_temperature_min_unit": "VARCHAR(64)",
@@ -106,6 +109,9 @@ def upgrade_schema(database_url: str) -> None:
 
 def _backfill_latest_observation_times(connection) -> None:
     element_groups = {
+        "surface_temperature_observed_at": (
+            "surface_temperature", "surface_temperature_unit", ("surface_temperature",),
+        ),
         "air_temperature_observed_at": ("air_temperature", "air_temperature_unit", ("air_temperature",)),
         "precipitation_observed_at": (
             "precipitation_1h",

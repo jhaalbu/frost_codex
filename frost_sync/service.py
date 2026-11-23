@@ -41,6 +41,7 @@ PRECIPITATION_ELEMENT = "sum(precipitation_amount PT1H)"
 PRECIPITATION_1H_ELEMENT = "precipitation_1h"
 PRECIPITATION_ELEMENT_IDS = {PRECIPITATION_ELEMENT, PRECIPITATION_1H_ELEMENT}
 AIR_TEMPERATURE_ELEMENT = "air_temperature"
+SURFACE_TEMPERATURE_ELEMENT = "surface_temperature"
 SNOW_DEPTH_ELEMENT = "snow_depth"
 SURFACE_SNOW_THICKNESS_ELEMENT = "surface_snow_thickness"
 SNOW_DEPTH_ELEMENT_IDS = {SNOW_DEPTH_ELEMENT, SURFACE_SNOW_THICKNESS_ELEMENT}
@@ -51,6 +52,7 @@ EXCLUDED_PRECIPITATION_SOURCE_IDS = {"2.36.0", "SN11000"}
 
 
 ELEMENT_FIELD_MAP = {
+    SURFACE_TEMPERATURE_ELEMENT: ("surface_temperature", "surface_temperature_unit", "surface_temperature_observed_at"),
     AIR_TEMPERATURE_ELEMENT: ("air_temperature", "air_temperature_unit", "air_temperature_observed_at"),
     PRECIPITATION_ELEMENT: ("precipitation_1h", "precipitation_1h_unit", "precipitation_observed_at"),
     PRECIPITATION_1H_ELEMENT: ("precipitation_1h", "precipitation_1h_unit", "precipitation_observed_at"),
@@ -73,6 +75,7 @@ NVE_TARGET_ELEMENTS = {
 }
 
 SNOWER_TARGET_ELEMENTS = {
+    SURFACE_TEMPERATURE_ELEMENT,
     AIR_TEMPERATURE_ELEMENT,
     SNOW_DEPTH_ELEMENT,
 }

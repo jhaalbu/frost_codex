@@ -34,6 +34,12 @@ from frost_sync.skred_api import SkredClient
 
 
 PARAMETER_DEFINITIONS = {
+    "surface_temperature": {
+        "label": "Overflatetemperatur",
+        "unit": "degC",
+        "element_ids": ["surface_temperature"],
+        "style": "line",
+    },
     "air_temperature": {
         "label": "Lufttemperatur",
         "unit": "degC",
@@ -84,6 +90,7 @@ PARAMETER_DEFINITIONS = {
 }
 
 CAPABILITY_FLAG_MAP = {
+    "surface_temperature": "has_surface_temperature",
     "air_temperature": "has_air_temperature",
     "sum(precipitation_amount PT1H)": "has_precipitation_1h",
     "precipitation_1h": "has_precipitation_1h",
@@ -97,6 +104,7 @@ CAPABILITY_FLAG_MAP = {
 }
 
 SEVEN_DAY_AGGREGATE_ELEMENT_MAP = {
+    "surface_temperature": ["surface_temperature"],
     "air_temperature": ["air_temperature", "mean(air_temperature PT1H)"],
     "precipitation_1h": ["sum(precipitation_amount PT1H)", "precipitation_1h"],
     "snow_depth": ["snow_depth", "surface_snow_thickness"],
@@ -1472,7 +1480,7 @@ def _fetch_snower_timeseries_rows(
     from_dt: datetime,
     to_dt: datetime,
 ) -> list[dict[str, Any]]:
-    supported = [parameter_id for parameter_id in parameter_ids if parameter_id in {"air_temperature", "snow_depth"}]
+    supported = [parameter_id for parameter_id in parameter_ids if parameter_id in {"air_temperature", "surface_temperature", "snow_depth"}]
     if not supported:
         return []
     return snower_client.fetch_observations_range(
@@ -1666,7 +1674,7 @@ def _build_direct_points(
         for observation in row.get("observations", []):
             if observation.get("elementId") not in allowed:
                 continue
-            if parameter_id == "air_temperature" and not valid_temperature(observation.get("value")):
+            if parameter_id in {"air_temperature", "surface_temperature"} and not valid_temperature(observation.get("value")):
                 continue
             key = _isoformat(reference_time)
             points_by_time[key] = {
@@ -2228,6 +2236,8 @@ def _compact_latest_properties(
         **_compact_latest_base_properties(station, latest),
         "air_temperature": _air_temperature_value_for_station(station, latest.air_temperature),
         "air_temperature_observed_at": _isoformat(latest.air_temperature_observed_at),
+        "surface_temperature": latest.surface_temperature,
+        "surface_temperature_observed_at": _isoformat(latest.surface_temperature_observed_at),
         "precipitation_1h": None if _station_precipitation_is_excluded(station) else latest.precipitation_1h,
         "precipitation_observed_at": _isoformat(latest.precipitation_observed_at),
         "is_precipitation_suspect": (latest.is_precipitation_suspect or _station_precipitation_is_excluded(station)) or None,
@@ -2758,7 +2768,7 @@ def _seven_day_aggregates_by_station(
     }
     aggregates: dict[int, dict[str, Any]] = {}
     max_rows: dict[tuple[int, str], Observation] = {}
-    min_temperature_rows: dict[int, Observation] = {}
+    min_temperature_rows: dict[tuple[int, str], Observation] = {}
     wind_direction_rows: dict[tuple[int, datetime], Observation] = {}
     precipitation_totals: dict[int, float] = {}
     precipitation_rows: dict[int, list[Observation]] = {}
@@ -2792,12 +2802,13 @@ def _seven_day_aggregates_by_station(
         if row_time is None or row_time < window_from or row_time > window_to:
             continue
 
-        if parameter_id == "air_temperature":
-            current_min = min_temperature_rows.get(row.station_id)
+        if parameter_id in {"air_temperature", "surface_temperature"}:
+            temperature_key = (row.station_id, parameter_id)
+            current_min = min_temperature_rows.get(temperature_key)
             if current_min is None or row.value < (
                 current_min.value if current_min.value is not None else float("inf")
             ):
-                min_temperature_rows[row.station_id] = row
+                min_temperature_rows[temperature_key] = row
 
         key = (row.station_id, parameter_id)
         current = max_rows.get(key)
@@ -2815,10 +2826,10 @@ def _seven_day_aggregates_by_station(
             if direction_row is not None:
                 station_aggregates["wind_direction_at_7dmax"] = direction_row.value
 
-    for station_id, row in min_temperature_rows.items():
+    for (station_id, parameter_id), row in min_temperature_rows.items():
         station_aggregates = aggregates.setdefault(station_id, {})
-        station_aggregates["air_temperature_min_7d"] = row.value
-        station_aggregates["air_temperature_min_7d_time"] = _isoformat(row.reference_time)
+        station_aggregates[f"{parameter_id}_min_7d"] = row.value
+        station_aggregates[f"{parameter_id}_min_7d_time"] = _isoformat(row.reference_time)
 
     for station_id, value in precipitation_totals.items():
         aggregates.setdefault(station_id, {})["precipitation_7d_accumulated"] = round(value, 3)
@@ -2977,6 +2988,9 @@ def _hbv_latest_properties(latest: StationLatest) -> dict[str, Any]:
 
 def _latest_properties(latest: StationLatest) -> dict[str, Any]:
     return {
+        "surface_temperature": latest.surface_temperature,
+        "surface_temperature_unit": latest.surface_temperature_unit,
+        "surface_temperature_observed_at": _isoformat(latest.surface_temperature_observed_at),
         "observed_at": _isoformat(latest.observed_at),
         "air_temperature": latest.air_temperature,
         "air_temperature_unit": latest.air_temperature_unit,

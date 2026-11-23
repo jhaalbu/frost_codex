@@ -53,6 +53,20 @@ Standardretensjon på 14 dagar gir rom for sjudøgnslag med 24 timars ekstra ned
 
 ## PythonAnywhere / WSGI
 
+### Ta i bruk overflatetemperatur
+
+Etter kodeoppdateringa må skjemaet oppgraderast før webappen eller timejobben brukar dei nye latest-kolonnane:
+
+```text
+python -m frost_sync init-db
+python -m frost_sync sync-metadata
+python -m frost_sync run-hourly
+```
+
+`init-db` legg til `surface_temperature`, `surface_temperature_unit` og `surface_temperature_observed_at` og fyller dei frå eventuell lagra observasjonshistorikk. `sync-metadata` oppdagar Frost-stasjonar med overflatetemperatur. `run-hourly` hentar verdiar og byggjer cachefilene med dei nye felta. Last deretter webappen på nytt. For Snower må `SNOWER_API_KEY` og `SNOWER_DOMAIN_ID` vere konfigurerte; capability blir oppretta når verdiar kjem inn. Sjudøgnsaggregata byggjer seg opp frå lokalt innsamla målingar.
+
+### Generelt oppsett
+
 1. Legg prosjektet i til dømes `/home/yourusername/frost_codex`, opprett eit virtuelt miljø med Python 3.11+ og installer `requirements.txt`.
 2. Konfigurer database og kjeldenøklar i `.env`. MySQL-URL har forma `mysql+pymysql://user:password@host/user$weather?charset=utf8mb4`; URL-kod spesialteikn i legitimasjonen.
 3. Endre `PROJECT_HOME` i `pythonanywhere_wsgi.py` til den faktiske prosjektstien. Kople webappen til dette WSGI-oppsettet og same virtuelle miljø.

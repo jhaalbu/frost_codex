@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import math
 
 
-TEMPERATURE_ELEMENTS = {"air_temperature", "mean(air_temperature PT1H)"}
+TEMPERATURE_ELEMENTS = {"air_temperature", "mean(air_temperature PT1H)", "surface_temperature"}
 
 
 def utc(value):
@@ -32,6 +32,7 @@ def sanitize_latest(latest, now: datetime) -> None:
     becoming latest. Recover it from valid per-parameter timestamps instead.
     """
     fields = {
+        "surface_temperature": "surface_temperature_observed_at",
         "air_temperature": "air_temperature_observed_at",
         "precipitation_1h": "precipitation_observed_at",
         "snow_depth": "snow_depth_observed_at",
@@ -47,7 +48,7 @@ def sanitize_latest(latest, now: datetime) -> None:
         stamp = utc(getattr(latest, time_field))
         value = getattr(latest, field)
         bad = (stamp is not None and stamp > now) or (
-            field == "air_temperature" and value is not None and not valid_temperature(value)
+            field in TEMPERATURE_ELEMENTS and value is not None and not valid_temperature(value)
         )
         if bad:
             setattr(latest, field, None)

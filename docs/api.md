@@ -1,6 +1,6 @@
 # API-referanse for Respons
 
-Referansen skildrar koden per 2026-10-28. Eksempla er illustrative og er ikkje produksjonsmålingar.
+Referansen skildrar koden per 2026-10-28, med overflatetemperatur lagt til 2026-11-23. Eksempla er illustrative og er ikkje produksjonsmålingar.
 
 ## Baseadresse og prefiks
 
@@ -58,6 +58,16 @@ Historikk og tidsseriar krev anten `date=YYYY-MM-DD` eller både `from` og `to` 
 ```
 
 ## Tidsserierespons
+
+`surface_temperature` gir overflatetemperatur frå Frost (`TSS` / `surface_temperature`) og Snower (`ir_temperature`), i `degC`. Parameteren finst i `/api/parameters` og begge tidsserierutene. Serien brukar kjelda sine måletidspunkt; Frost-overflatetemperatur blir levert som råmålingar, utan timeaggregering.
+
+```text
+/weather/api/stations/SN123/timeseries?parameters=surface_temperature&date=2026-11-22
+/weather/api/timeseries?stations=SN123,SNWR-example&parameters=air_temperature,surface_temperature&date=2026-11-22
+/weather/api/stations/latest.geojson?has=surface_temperature
+```
+
+Full latest og stasjonsdetaljar har `surface_temperature`, `surface_temperature_unit` og `surface_temperature_observed_at`, samt capability-flagget `has_surface_temperature`. Compact og FME har verdi og måletidspunkt etter dei vanlege eksportreglane. Sjudøgnslaget har `surface_temperature_min_7d` og `surface_temperature_max_7d` med tilhøyrande `*_time`. Manglande måling er `null` eller utelate; 0 °C er ein gyldig verdi.
 
 `discharge_hbv` kan plottast saman med `discharge`. HBV blir henta frå VEPS og er modellert døgnmiddel, også for framtidige tidspunkt. Alle latest-variantane har HBV-prognosen for neste døgn med eige prognosetidspunkt og hentetid. Sjå [HBV-kontrakten og døme](nve_hbv.md) for felt, døgnval og utrulling. Desse HBV-felta blir behaldne òg i FME og dei kompakte eksportane.
 
