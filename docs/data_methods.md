@@ -26,6 +26,7 @@ Sjå [Datakjelder](providers.md) for alle dei seks leverandørane og korleis dat
 - API-et returnerer tidsstempel i ISO 8601-format med UTC, til dømes `2026-08-05T12:00:00Z`.
 - Når `init-db` blir køyrd på nytt, legg kommandoen til manglande tidsstempelkolonnar for kvar parameter og fyller dei frå dei nyaste samsvarande radene som er behaldne i `observations`. Tidsstempelet blir verande `null` når det ikkje finst ei samsvarande historikkrad, og blir fylt ved ein seinare synk.
 - Felt som `has_air_temperature` og `has_snow_depth` kjem frå `station_capabilities`, ikkje frå om siste måleverdi er ulik `null`.
+- `delta_t` er lufttemperatur minus overflatetemperatur i °C, avrunda til to desimalar og rekna ved bygging av full latest, compact, FME og stasjonsdetaljar. Dei eksisterande temperaturfiltra gjeld, begge einingar må vere `degC`, og kjende måletidspunkt må vere høgst 15 minutt frå kvarandre og ikkje i framtida. Manglande samsvar gir `null` (utelate i compact). Grensa på 15 minutt er ei praktisk avgrensing for samanstilling av målingar. Det er inga eiga aldersgrense; bruk temperaturane sine måletidspunkt til å vurdere ferskheit. Feltet blir ikkje lagra eller brukt som kantkorn-/skredklassifisering.
 - `parameter_profile` blir avleidd frå måleeigenskapane: `complete` tyder temperatur, nedbør, vind og snø; `weather` tyder temperatur, nedbør og vind; `snow` tyder at snødata er tilgjengelege; alle andre kombinasjonar får `lesser`.
 
 ### Nedbørsfilter

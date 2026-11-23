@@ -142,6 +142,7 @@ DAILY_AGGREGATE_ELEMENT_IDS = {
 } | SEVEN_DAY_WIND_DIRECTION_ELEMENT_IDS
 
 EXCLUDED_PRECIPITATION_SOURCE_IDS = {"2.36.0", "SN11000"}
+DELTA_T_MAX_TIME_DIFFERENCE = timedelta(minutes=15)
 
 # Unknown status includes Snower rows created before active status was stored.
 VISIBLE_STATION = (Station.provider != "snower") | Station.snower_active.is_(True)
@@ -2238,6 +2239,7 @@ def _compact_latest_properties(
         "air_temperature_observed_at": _isoformat(latest.air_temperature_observed_at),
         "surface_temperature": latest.surface_temperature,
         "surface_temperature_observed_at": _isoformat(latest.surface_temperature_observed_at),
+        "delta_t": _delta_t_for_station(station, latest),
         "precipitation_1h": None if _station_precipitation_is_excluded(station) else latest.precipitation_1h,
         "precipitation_observed_at": _isoformat(latest.precipitation_observed_at),
         "is_precipitation_suspect": (latest.is_precipitation_suspect or _station_precipitation_is_excluded(station)) or None,
@@ -2911,6 +2913,25 @@ def _air_temperature_value_for_station(station: Station, value: float | None) ->
     return value
 
 
+def _delta_t_for_station(station: Station, latest: StationLatest) -> float | None:
+    """Air minus surface temperature, using measurements at most 15 minutes apart."""
+    air_temperature = _air_temperature_value_for_station(station, latest.air_temperature)
+    surface_temperature = latest.surface_temperature
+    if air_temperature is None or not valid_temperature(surface_temperature):
+        return None
+    if latest.air_temperature_unit != "degC" or latest.surface_temperature_unit != "degC":
+        return None
+
+    air_time = _ensure_utc(latest.air_temperature_observed_at)
+    surface_time = _ensure_utc(latest.surface_temperature_observed_at)
+    now = datetime.now(timezone.utc)
+    if air_time is None or surface_time is None or air_time > now or surface_time > now:
+        return None
+    if abs(air_time - surface_time) > DELTA_T_MAX_TIME_DIFFERENCE:
+        return None
+    return round(air_temperature - surface_temperature, 2)
+
+
 def _is_suspect_road_station_temperature(station: Station | None, value: float | None) -> bool:
     return bool(
         station
@@ -2933,6 +2954,7 @@ def _without_null_values(properties: dict[str, Any]) -> dict[str, Any]:
 
 def _latest_properties_for_station(station: Station, latest: StationLatest) -> dict[str, Any]:
     properties = _latest_properties(latest)
+    properties["delta_t"] = _delta_t_for_station(station, latest)
     if _is_suspect_road_station_temperature(station, latest.air_temperature):
         properties["air_temperature"] = None
         properties["air_temperature_unit"] = None

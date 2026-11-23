@@ -1,6 +1,7 @@
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
+from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 from sqlalchemy import create_engine, select, text
@@ -187,6 +188,76 @@ class SurfaceTemperatureTest(unittest.TestCase):
             self.assertEqual(latest.surface_temperature, -3)
             self.assertEqual(latest.surface_temperature_unit, "degC")
             self.assertEqual(web._isoformat(latest.surface_temperature_observed_at), web._isoformat(self.stamp))
+
+    def test_delta_t_in_latest_routes_and_station_details(self):
+        samples = [("SN123", "frost", -5, -12, 7),
+                   ("SNWR-test", "snower", -2, 1, -3),
+                   ("SN124", "frost", 0, 0, 0)]
+        with self.factory.begin() as session:
+            for source, provider, air, surface, expected in samples:
+                station = self.station(session, source, provider)
+                session.add(StationLatest(
+                    station_id=station.id, source_id=source, observed_at=self.stamp, updated_at=self.now,
+                    air_temperature=air, air_temperature_unit="degC", air_temperature_observed_at=self.stamp,
+                    surface_temperature=surface, surface_temperature_unit="degC",
+                    surface_temperature_observed_at=self.stamp - timedelta(minutes=15)))
+        expected_values = {source: expected for source, provider, air, surface, expected in samples}
+        with TemporaryDirectory() as folder:
+            settings = Settings(None, None, None, None, proxy_api_key="test", geojson_cache_dir=folder)
+            with patch.object(web, "load_settings", return_value=settings), \
+                 patch.object(web, "create_session_factory", return_value=self.factory):
+                client = web.create_app().test_client()
+            for suffix in ["latest.geojson", "latest.compact.geojson", "latest.fme.geojson"]:
+                with self.subTest(suffix=suffix):
+                    response = client.get("/api/stations/" + suffix)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual({f["properties"]["source_id"]: f["properties"]["delta_t"]
+                                      for f in response.json["features"]}, expected_values)
+            for source, expected in expected_values.items():
+                response = client.get("/api/stations/" + source, headers={"X-API-Key": "test"})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json["latest"]["delta_t"], expected)
+
+    def test_delta_t_missing_invalid_and_mismatched_measurements(self):
+        cases = [
+            ({"air_temperature": None}, None),
+            ({"surface_temperature": None}, None),
+            ({"air_temperature_observed_at": None}, None),
+            ({"surface_temperature_observed_at": None}, None),
+            ({"surface_temperature_observed_at": self.stamp - timedelta(minutes=15, seconds=1)}, None),
+            ({"air_temperature_observed_at": self.stamp - timedelta(minutes=15, seconds=1)}, None),
+            ({"air_temperature_observed_at": self.now + timedelta(minutes=1)}, None),
+            ({"surface_temperature_observed_at": self.now + timedelta(minutes=1)}, None),
+            ({"air_temperature": float("nan")}, None),
+            ({"surface_temperature": float("inf")}, None),
+            ({"surface_temperature": 99}, None),
+            ({"air_temperature": -40}, None),  # Existing road-station sentinel filter.
+            ({"air_temperature_unit": "K"}, None),
+            ({"surface_temperature_unit": None}, None),
+            ({"air_temperature": -5.12, "surface_temperature": -12.34}, 7.22),
+            ({"air_temperature_observed_at": self.stamp.replace(tzinfo=None)}, 7),
+            ({"air_temperature_observed_at": self.stamp - timedelta(days=3),
+              "surface_temperature_observed_at": self.stamp - timedelta(days=3)}, 7),
+        ]
+        with self.factory.begin() as session:
+            for index, (changes, expected) in enumerate(cases):
+                station = self.station(session, f"SN{index}")
+                values = dict(air_temperature=-5, air_temperature_unit="degC", air_temperature_observed_at=self.stamp,
+                              surface_temperature=-12, surface_temperature_unit="degC", surface_temperature_observed_at=self.stamp)
+                values.update(changes)
+                session.add(StationLatest(station_id=station.id, source_id=station.source_id,
+                                          observed_at=self.stamp, updated_at=self.now, **values))
+        for builder in [web.build_latest_geojson, web.build_latest_compact_geojson, web.build_latest_fme_geojson]:
+            properties = {f["properties"]["source_id"]: f["properties"] for f in builder(self.factory)["features"]}
+            for index, (changes, expected) in enumerate(cases):
+                with self.subTest(builder=builder.__name__, changes=changes):
+                    result = properties[f"SN{index}"]
+                    self.assertEqual(result.get("delta_t"), expected)
+                    if expected is None:
+                        if builder == web.build_latest_compact_geojson:
+                            self.assertNotIn("delta_t", result)
+                        else:
+                            self.assertIn("delta_t", result)
 
 
 if __name__ == "__main__":

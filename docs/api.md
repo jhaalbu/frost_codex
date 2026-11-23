@@ -69,6 +69,8 @@ Historikk og tidsseriar krev anten `date=YYYY-MM-DD` eller både `from` og `to` 
 
 Full latest og stasjonsdetaljar har `surface_temperature`, `surface_temperature_unit` og `surface_temperature_observed_at`, samt capability-flagget `has_surface_temperature`. Compact og FME har verdi og måletidspunkt etter dei vanlege eksportreglane. Sjudøgnslaget har `surface_temperature_min_7d` og `surface_temperature_max_7d` med tilhøyrande `*_time`. Manglande måling er `null` eller utelate; 0 °C er ein gyldig verdi.
 
+Full latest, compact, FME og `latest` i stasjonsdetaljar har òg `delta_t = air_temperature - surface_temperature`, i °C og avrunda til to desimalar. Positiv verdi tyder at overflata er kaldare enn lufta. Begge temperaturane må vere gyldige i `degC`, med kjende måletidspunkt som er høgst 15 minutt frå kvarandre og ikkje i framtida. Elles er feltet `null` (utelate i compact). Bruk dei to `*_observed_at`-felta for å vurdere alderen; samstemde, eldre målingar kan framleis ha ein `delta_t`. Dette er ein rå temperaturskilnad, utan krav om snødekke, minusgrader eller terskel for omvandling. Feltet blir rekna ved respons-/cachebygging og krev inga ny databasekolonne. Bygg GeoJSON-cache på nytt etter kodeoppdatering, eller lat neste timejobb gjere det.
+
 `discharge_hbv` kan plottast saman med `discharge`. HBV blir henta frå VEPS og er modellert døgnmiddel, også for framtidige tidspunkt. Alle latest-variantane har HBV-prognosen for neste døgn med eige prognosetidspunkt og hentetid. Sjå [HBV-kontrakten og døme](nve_hbv.md) for felt, døgnval og utrulling. Desse HBV-felta blir behaldne òg i FME og dei kompakte eksportane.
 
 Eitt-stasjonsruta returnerer denne forma (illustrativt datapunkt):
