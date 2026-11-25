@@ -36,6 +36,11 @@ class Settings:
     acceptable_quality_codes: str = "0,1,2,3,4"
     geojson_cache_dir: str = "geojson_cache"
     proxy_api_key: str | None = None
+    netatmo_client_id: str | None = None
+    netatmo_client_secret: str | None = None
+    netatmo_access_token: str | None = None
+    netatmo_refresh_token: str | None = None
+    netatmo_token_file: str = ".netatmo_tokens.db"
 
 
 def load_settings() -> Settings:
@@ -68,6 +73,11 @@ def load_settings() -> Settings:
         skred_api_token=skred_api_token,
         database_url=database_url,
         proxy_api_key=os.getenv("PROXY_API_KEY", "").strip() or None,
+        netatmo_client_id=_env_alias("NETATMO_CLIENT_ID", "NETAMO_CLIENT_ID"),
+        netatmo_client_secret=_env_alias("NETATMO_CLIENT_SECRET", "NETATMO_SECRET_ID"),
+        netatmo_access_token=_env_alias("NETATMO_ACCESS_TOKEN", "NETAMO_ACCESS_TOKEN"),
+        netatmo_refresh_token=_env_alias("NETATMO_REFRESH_TOKEN", "NETAMO_REFRESH_TOKEN"),
+        netatmo_token_file=os.getenv("NETATMO_TOKEN_FILE", ".netatmo_tokens.db").strip() or ".netatmo_tokens.db",
         nve_hydapi_base_url=os.getenv("NVE_HYDAPI_BASE_URL", "https://hydapi.nve.no/api/v1").strip() or "https://hydapi.nve.no/api/v1",
         nve_veps_base_url=os.getenv("NVE_VEPS_BASE_URL", "https://vepsapi.nve.no").strip() or "https://vepsapi.nve.no",
         snower_base_url=os.getenv("SNOWER_BASE_URL", "https://app.snower.fi/api").strip() or "https://app.snower.fi/api",
@@ -88,6 +98,10 @@ def require_frost_client_id(settings: Settings) -> str:
     if not settings.frost_client_id:
         raise RuntimeError("Missing required environment variable FROST_CLIENT_ID")
     return settings.frost_client_id
+
+
+def _env_alias(*names: str) -> str | None:
+    return next((value for name in names if (value := os.getenv(name, "").strip())), None)
 
 
 def _load_dotenv(env_file: str = DEFAULT_ENV_FILE) -> None:

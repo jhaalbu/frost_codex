@@ -15,6 +15,9 @@ Sjå [README](../README.md) for lokal oppstart. Dette er driftsrutinar for imple
 | `SNOWER_API_KEY` | `snk_`-nøkkel; erstattar eldre brukarnamn/passord |
 | `SNOWER_DOMAIN_ID` | Set til t.d. `frost-sync`. CLI krev verdi for å opprette Snower-klienten; webdelen har tilbakefall til `frost-sync` |
 | `TILSIG_API_KEY`, `WYSSEN_API_KEY`, `SKRED_API_TOKEN` | Aktiverer respektive kjelder |
+| `NETATMO_CLIENT_ID`, `NETATMO_CLIENT_SECRET`, `NETATMO_REFRESH_TOKEN` | Aktiverer Netatmo. OAuth-token må ha `read_station`; eldre stavevariantar er støtta, sjå [datakjelder](providers.md#netatmo) |
+| `NETATMO_ACCESS_TOKEN` | Valfritt starttoken; blir automatisk fornya ved utløp |
+| `NETATMO_TOKEN_FILE` | `.netatmo_tokens.db`; inneheld roterande token. Bruk same absolutte sti for web og jobbar, med skrivetilgang. Hald fila og eventuelle journalfiler utanfor versjonskontroll og offentleg filserver |
 | `NVE_VEPS_BASE_URL` | `https://vepsapi.nve.no`; HBV blir aktivert saman med NVE-integrasjonen |
 | `NVE_HYDAPI_BASE_URL` | `https://hydapi.nve.no/api/v1` |
 | `SNOWER_BASE_URL` | `https://app.snower.fi/api` |

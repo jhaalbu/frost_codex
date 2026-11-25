@@ -31,6 +31,7 @@ from frost_sync.snower_api import SnowerClient
 from frost_sync.tilsig_api import TilsigClient
 from frost_sync.wyssen_api import WyssenClient
 from frost_sync.skred_api import SkredClient
+from frost_sync.netatmo_api import NetatmoClient, create_netatmo_client
 
 
 PARAMETER_DEFINITIONS = {
@@ -76,8 +77,8 @@ PARAMETER_DEFINITIONS = {
         "fallback_aggregation": "max",
         "style": "line",
     },
-    # Skred AS/InﬂuxDB: eigne felt, uavhengig av eksisterande timesaggregat.
-    "wind_speed_of_gust": {"label": "Vindkast (Skred AS)", "unit": "m/s", "element_ids": ["wind_speed_of_gust"], "style": "line"},
+    # Native gusts (Skred AS/Netatmo), separate from Frost's defined periods.
+    "wind_speed_of_gust": {"label": "Vindkast", "unit": "m/s", "element_ids": ["wind_speed_of_gust"], "style": "line"},
     "wind_speed_fc_low": {"label": "Vindhastigheit snøfokksensor låg", "unit": "m/s", "element_ids": ["wind_speed_fc_low"], "style": "line"},
     "wind_speed_fc_high": {"label": "Vindhastigheit snøfokksensor høg", "unit": "m/s", "element_ids": ["wind_speed_fc_high"], "style": "line"},
     "snow_drift_low": {"label": "Snøfokk låg sensor", "unit": "g/m2/s", "element_ids": ["snow_drift_low"], "style": "line"},
@@ -145,7 +146,9 @@ EXCLUDED_PRECIPITATION_SOURCE_IDS = {"2.36.0", "SN11000"}
 DELTA_T_MAX_TIME_DIFFERENCE = timedelta(minutes=15)
 
 # Unknown status includes Snower rows created before active status was stored.
-VISIBLE_STATION = (Station.provider != "snower") | Station.snower_active.is_(True)
+VISIBLE_STATION = ((Station.provider != "snower") | Station.snower_active.is_(True)) & (
+    (Station.provider != "netatmo") | Station.valid_to.is_(None)
+)
 
 
 def create_app() -> Flask:
@@ -191,6 +194,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
         base_url=settings.skred_base_url,
         timeout_seconds=settings.request_timeout_seconds,
     ) if settings.skred_api_token else None
+    netatmo_client = create_netatmo_client(settings)
 
     @blueprint.get("/health")
     def health() -> Any:
@@ -465,6 +469,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
             tilsig_client=tilsig_client,
             wyssen_client=wyssen_client,
             skred_client=skred_client,
+            netatmo_client=netatmo_client,
             discharge_thresholds=discharge_thresholds,
             discharge_percentiles=discharge_percentiles,
         )
@@ -518,6 +523,7 @@ def create_blueprint(name: str = "frost_sync") -> Blueprint:
                 tilsig_client=tilsig_client,
                 wyssen_client=wyssen_client,
                 skred_client=skred_client,
+                netatmo_client=netatmo_client,
                 discharge_threshold=threshold,
                 discharge_percentiles=percentiles.get(station.id, []),
             )
@@ -996,9 +1002,13 @@ def _cached_geojson_response(settings: Settings, filename: str, session_factory)
 
 
 def _active_snower_ids(session_factory) -> set[str]:
+    # Include Netatmo access changes in the existing account-station cache key.
     with session_factory() as session:
         return set(session.scalars(
-            select(Station.source_id).where(Station.provider == "snower", Station.snower_active.is_(True))
+            select(Station.source_id).where(
+                ((Station.provider == "snower") & Station.snower_active.is_(True))
+                | ((Station.provider == "netatmo") & Station.valid_to.is_(None))
+            )
         ))
 
 
@@ -1115,6 +1125,7 @@ def _build_timeseries_payload_for_station(
     skred_client: SkredClient | None = None,
     discharge_threshold: NveDischargeFloodThreshold | None = None,
     discharge_percentiles: list[dict[str, Any]] | None = None,
+    netatmo_client: NetatmoClient | None = None,
 ) -> dict[str, Any]:
     normalized_rows = _fetch_timeseries_rows_for_station(
         station=station,
@@ -1127,6 +1138,7 @@ def _build_timeseries_payload_for_station(
         tilsig_client=tilsig_client,
         wyssen_client=wyssen_client,
         skred_client=skred_client,
+        netatmo_client=netatmo_client,
     )
     return {
         "station": _timeseries_station_properties(station),
@@ -1158,6 +1170,7 @@ def _build_timeseries_payloads_for_stations(
     skred_client: SkredClient | None = None,
     discharge_thresholds: dict[int, NveDischargeFloodThreshold] | None = None,
     discharge_percentiles: dict[int, list[dict[str, Any]]] | None = None,
+    netatmo_client: NetatmoClient | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     rows_by_source: dict[str, list[dict[str, Any]]] = {station.source_id: [] for station in stations}
     errors: list[dict[str, str]] = []
@@ -1259,6 +1272,13 @@ def _build_timeseries_payloads_for_stations(
                 )
             except (RuntimeError, ValueError) as exc:
                 errors.append({"source_id": station.source_id, "message": str(exc)})
+        elif station.provider == "netatmo":
+            try:
+                rows_by_source[station.source_id] = _fetch_netatmo_timeseries_rows(
+                    netatmo_client, station, parameter_ids, from_dt, to_dt,
+                )
+            except (RuntimeError, ValueError) as exc:
+                errors.append({"source_id": station.source_id, "message": str(exc)})
         elif station.provider not in {"frost", "nve_hydapi"}:
             errors.append({"source_id": station.source_id, "message": f"Unsupported provider: {station.provider}"})
 
@@ -1333,6 +1353,7 @@ def _fetch_timeseries_rows_for_station(
     tilsig_client: TilsigClient | None = None,
     wyssen_client: WyssenClient | None = None,
     skred_client: SkredClient | None = None,
+    netatmo_client: NetatmoClient | None = None,
 ) -> list[dict[str, Any]]:
     if station.provider == "frost":
         if frost_client is None:
@@ -1397,7 +1418,29 @@ def _fetch_timeseries_rows_for_station(
             to_dt=to_dt,
         )
 
+    if station.provider == "netatmo":
+        return _fetch_netatmo_timeseries_rows(netatmo_client, station, parameter_ids, from_dt, to_dt)
+
     raise RuntimeError(f"Unsupported provider: {station.provider}")
+
+
+def _fetch_netatmo_timeseries_rows(
+    netatmo_client: NetatmoClient | None, station: Station, parameter_ids: list[str],
+    from_dt: datetime, to_dt: datetime,
+) -> list[dict[str, Any]]:
+    if netatmo_client is None:
+        raise RuntimeError("Netatmo client is not configured")
+    wanted = set(parameter_ids)
+    if wanted & {"precipitation_24h_rolling", "precipitation_accumulated"}:
+        wanted.add("precipitation_1h")
+    try:
+        return netatmo_client.fetch_observations_range(
+            provider_context=station.provider_context,
+            from_dt=_lookback_start(from_dt, parameter_ids), to_dt=to_dt,
+            logical_parameter_ids=sorted(wanted),
+        )
+    except ValueError:
+        raise RuntimeError("Invalid Netatmo provider_context or range; run sync-metadata and check dates") from None
 
 
 def _fetch_frost_timeseries_rows(

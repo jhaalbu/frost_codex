@@ -1,0 +1,4130 @@
+=(function() {
+  /*
+    FORVENTA INPUT
+
+    Alternativ 1: fleire stasjonar
+    const stationApisRaw = [
+      {
+        station: {...},
+        series: {...}
+      },
+      {
+        station: {...},
+        series: {...}
+      }
+    ];
+
+    Alternativ 2: ein stasjon
+    const stationApisRaw = {
+      station: {...},
+      series: {...}
+    };
+  */
+
+  const stationApisRaw = $webRequestAlle.json;
+  // Ny identitet kvar gong Evaluate Expression leverer eit nytt datasett.
+  const weatherExpressionRevision = {};
+  const stationApis = normalizeStationApis(stationApisRaw);
+
+  if (!stationApis.length) {
+    return {
+      chart: {
+        events: {
+          load: function() { syncWeatherHighlight(this); },
+          render: function() { syncWeatherHighlight(this); },
+          destroy: function() { destroyWeatherHighlight(this); }
+        }
+      },
+      title: { text: "Ingen stasjonsdata tilgjengelig" },
+      subtitle: { text: "" },
+      series: [],
+      yAxis: [],
+      xAxis: { type: "datetime" }
+    };
+  }
+
+  const MAX_STATIONS_IN_ALL_MODE = 8;
+
+  // Knappe-layout. Knappane blir lagt ut dynamisk etter faktisk chart-breidde.
+  const DEFAULT_CHART_WIDTH = 1100;
+
+  const TOP_ACTION_BUTTON_Y = 8;
+
+  const BUTTON_START_X = 8;
+  const BUTTON_START_Y = 42;
+  const BUTTON_ROW_HEIGHT = 32;
+
+  const STATION_BUTTON_MIN_WIDTH = 70;
+  const STATION_BUTTON_MAX_WIDTH = 170;
+
+  const WINDROSE_BUTTON_WIDTH = 95;
+
+  const PARAMETER_BUTTON_MIN_WIDTH = 95;
+  const PARAMETER_BUTTON_MAX_WIDTH = 135;
+
+  const BUTTON_GAP_X = 8;
+
+  const STATION_BUTTON_WIDTH = 125;
+  const PARAMETER_BUTTON_WIDTH = 130;
+
+  const STATION_BUTTON_GAP_X = 6;
+  const PARAMETER_BUTTON_GAP_X = 4;
+
+  const DOWNLOAD_BUTTON_WIDTH = 95;
+  const MODE_BUTTON_WIDTH = 115;
+  const ACTION_BUTTON_GAP_X = 8;
+  const ACTION_BUTTON_LEFT_X = 8;
+
+  // Reservert plass til høgreknappar: "Vis per parameter"/"Enkelt stasjon" + "Last ned data".
+  const RIGHT_RESERVED_STATION_MODE = 16;
+  const RIGHT_RESERVED_PARAMETER_MODE = 16;
+
+  const params = [
+    {
+      key: "precipitation_1h",
+      label: "Nedbør 1t (mm)",
+      shortLabel: "Nedbør 1t",
+      type: "column",
+      color: "#2f6df6",
+      min: 0,
+      softMax: 4,
+      maxHeight: 24
+    },
+    {
+      key: "precipitation_accumulated",
+      label: "Akkumulert nedbør (mm)",
+      shortLabel: "Akk. nedbør",
+      type: "spline",
+      color: "#0050c0",
+      min: 0,
+      softMax: 10,
+      fixedHeight: 10
+    },
+    {
+      key: "air_temperature",
+      label: "Temperatur (°C)",
+      shortLabel: "Temperatur",
+      type: "spline",
+      temperatureZones: true,
+      maxHeight: 30,
+      members: [
+        {
+          key: "air_temperature",
+          label: "Lufttemperatur (°C)",
+          color: null,
+          dashStyle: "Solid"
+        },
+        {
+          key: "surface_temperature",
+          label: "Overflatetemperatur (°C)",
+          color: null,
+          dashStyle: "ShortDash"
+        }
+      ]
+    },
+    {
+      key: "wind",
+      label: "Vind (m/s)",
+      shortLabel: "Vind",
+      type: "spline",
+      softMax: 25,
+      maxHeight: 28,
+      includeDirectionSubplotInAllMode: true,
+      directionKey: "wind_from_direction",
+      members: [
+        {
+          key: "wind_speed",
+          label: "Vindhastighet",
+          color: "#7c3aed",
+          dashStyle: "Solid"
+        },
+        {
+          key: "wind_gust_10m",
+          label: "Vindkast",
+          color: "#a855f7",
+          dashStyle: "ShortDash"
+        },
+        {
+          key: "wind_speed_of_gust",
+          label: "Vindkast (Skred AS)",
+          color: "#a855f7",
+          dashStyle: "ShortDash",
+          fallbackFor: "wind_gust_10m"
+        }
+      ]
+    },
+    {
+      key: "wind_from_direction",
+      label: "Vindretning",
+      shortLabel: "Vindretning",
+      type: "scatter",
+      color: "#111827",
+      fixedHeight: 2,
+      windArrows: true
+    },
+    {
+      key: "snow_depth",
+      label: "Snødybde (cm)",
+      shortLabel: "Snødybde",
+      type: "line",
+      color: "#06b6d4",
+      min: 0,
+      softMax: 50,
+      maxHeight: 30
+    },
+    // Skred AS: eigne sensorpar med felles akse innan kvar eining.
+    {
+      key: "snow_drift",
+      label: "Snøfokk (g/m²/s)",
+      shortLabel: "Snøfokk",
+      type: "spline",
+      min: 0,
+      maxHeight: 26,
+      members: [
+        { key: "snow_drift_low", label: "Snøfokk låg", color: "#0891b2", dashStyle: "Solid" },
+        { key: "snow_drift_high", label: "Snøfokk høg", color: "#f97316", dashStyle: "Solid" }
+      ]
+    },
+    {
+      key: "snow_drift_cumsum",
+      label: "Akkumulert snøfokk (g/m²/10 min)",
+      shortLabel: "Akk. snøfokk",
+      type: "spline",
+      min: 0,
+      maxHeight: 26,
+      members: [
+        { key: "snow_drift_low_cumsum", label: "Akk. snøfokk låg", color: "#0891b2", dashStyle: "Solid" },
+        { key: "snow_drift_high_cumsum", label: "Akk. snøfokk høg", color: "#f97316", dashStyle: "Solid" }
+      ]
+    },
+    {
+      key: "snow_drift_wind",
+      label: "Vind ved snøfokksensor (m/s)",
+      shortLabel: "Vind snøfokk",
+      type: "spline",
+      min: 0,
+      maxHeight: 26,
+      members: [
+        { key: "wind_speed_fc_low", label: "Vind låg sensor", color: "#0d9488", dashStyle: "Solid" },
+        { key: "wind_speed_fc_high", label: "Vind høg sensor", color: "#ea580c", dashStyle: "Solid" }
+      ]
+    },
+    {
+      key: "discharge",
+      label: "Vannføring (m³/s)",
+      shortLabel: "Vannføring",
+      type: "spline",
+      min: 0,
+      maxHeight: 30,
+      color: "#2563eb"
+    },
+    {
+      key: "groundwater_level",
+      label: "Grunnvannsnivå (m)",
+      shortLabel: "Grunnvann",
+      type: "spline",
+      maxHeight: 30,
+      color: "#92400e"
+    }
+  ];
+
+  const firstStationOptions = buildStationSpecificOptions(stationApis[0], null);
+
+  return {
+    time: {
+      timezone: "Europe/Oslo"
+    },
+
+    chart: {
+      zoomType: "xy",
+
+      marginTop: calculateChartMarginTop(
+        null,
+        getSingleModeButtonCount(stationApis),
+        STATION_BUTTON_WIDTH,
+        STATION_BUTTON_GAP_X,
+        RIGHT_RESERVED_STATION_MODE
+      ),
+
+      events: {
+        load: function() {
+          const nextOptions = buildStationSpecificOptions(
+            stationApis[0],
+            this
+          );
+
+          this.setTitle(
+            nextOptions.title,
+            nextOptions.subtitle,
+            false
+          );
+
+          this.update({
+            chart: {
+              marginTop: calculateChartMarginTop(
+                this,
+                getSingleModeButtonCount(stationApis),
+                STATION_BUTTON_WIDTH,
+                STATION_BUTTON_GAP_X,
+                RIGHT_RESERVED_STATION_MODE
+              )
+            },
+
+            exporting: {
+              buttons: makeStationModeButtons(
+                this,
+                stationApis,
+                0
+              )
+            }
+          }, false);
+
+          syncWeatherHighlight(this);
+          this.redraw();
+        },
+        // load køyrer ikkje på nytt ved chart.update i ei open VertiGIS-fane.
+        render: function() {
+          syncWeatherHighlight(this);
+        },
+        destroy: function() {
+          destroyWeatherHighlight(this);
+        }
+      }
+    },
+
+    title: firstStationOptions.title,
+
+    subtitle: {
+      text: null
+    },
+
+    xAxis: [
+      // -------------------------------------------------------
+      // Nedre datoakse
+      // -------------------------------------------------------
+      {
+        type: "datetime",
+
+        tickInterval: 24 * 3600 * 1000,
+        minorTickInterval: 12 * 3600 * 1000,
+
+        gridLineWidth: 1,
+        gridLineColor: "rgba(128,128,128,0.1)",
+
+        crosshair: true,
+
+        labels: {
+          rotation: -45,
+
+          formatter: function() {
+            const weekdays = [
+              "søn",
+              "man",
+              "tir",
+              "ons",
+              "tor",
+              "fre",
+              "lør"
+            ];
+
+            const dayIndex = parseInt(
+              Highcharts.dateFormat(
+                "%w",
+                this.value
+              ),
+              10
+            );
+
+            return (
+              weekdays[dayIndex] +
+              " " +
+              Highcharts.dateFormat(
+                "%e. %b",
+                this.value
+              )
+            );
+          }
+        }
+      },
+
+      // -------------------------------------------------------
+      // Øvre datoakse
+      // -------------------------------------------------------
+      {
+        type: "datetime",
+
+        linkedTo: 0,
+        opposite: true,
+
+        tickInterval: 24 * 3600 * 1000,
+
+        gridLineWidth: 0,
+        minorGridLineWidth: 0,
+
+        labels: {
+          format: "{value:%e. %b}",
+          rotation: 0,
+
+          style: {
+            fontSize: "10px"
+          }
+        },
+
+        tickLength: 4,
+        lineWidth: 1
+      }
+    ],
+
+    yAxis: firstStationOptions.yAxis,
+
+    plotOptions: firstStationOptions.plotOptions,
+
+    series: firstStationOptions.series,
+
+    exporting: {
+      buttons: makeStationModeButtons(
+        null,
+        stationApis,
+        0
+      )
+    },
+
+    legend: {
+      enabled: false,
+
+      align: "center",
+      layout: "horizontal",
+      verticalAlign: "bottom",
+
+      itemStyle: {
+        fontSize: "10px"
+      }
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // VANLEG MODUS: ÉIN STASJON, ALLE PARAMETRAR
+  // ---------------------------------------------------------------------------
+
+  function buildStationSpecificOptions(api, chart) {
+    const station = api.station || {};
+    const data = api.series || {};
+
+    const activeParams = [];
+
+    for (let i = 0; i < params.length; i++) {
+      const p = params[i];
+
+      if (paramHasData(p, data)) {
+        activeParams.push(p);
+      }
+    }
+
+    if (activeParams.length === 0) {
+      return {
+        title: { text: "Ingen data tilgjengelig" },
+        subtitle: { text: station.name || "" },
+        series: [],
+        yAxis: [],
+        plotOptions: {}
+      };
+    }
+
+    const axisOrder = [];
+
+    for (let i = 0; i < activeParams.length; i++) {
+      axisOrder.push(activeParams[i].key);
+    }
+
+    const GAP = 2;
+    const START_TOP = 0;
+    const totalAvailableHeight = 100;
+
+    const axisHeights = calculateAxisHeights(activeParams, GAP, totalAvailableHeight);
+
+    let currentTop = START_TOP;
+
+    const yAxis = [];
+    const series = [];
+
+    for (let i = 0; i < activeParams.length; i++) {
+      const param = activeParams[i];
+
+      const height = axisHeights[i];
+      const top = currentTop;
+
+      currentTop += height + GAP;
+
+      const axis = makeStandardAxis(param, param.key, top, height, param.label);
+
+      if (param.windArrows) {
+      applyWindDirectionAxisStyle(axis);
+      }
+
+      if (param.key === "discharge") {
+      applyDischargeThresholds(axis, data.discharge);
+      }
+
+    yAxis.push(axis);
+
+      addSeriesForParam({
+        param: param,
+        station: station,
+        data: data,
+        axisId: param.key,
+        series: series,
+        includeWindArrows: true
+      });
+    }
+
+    return {
+      title: {
+        text: makeStationMetaTitle(station),
+        align: "center",
+        y: calculateTitleY(
+          chart,
+          getSingleModeButtonCount(stationApis),
+          STATION_BUTTON_WIDTH,
+          STATION_BUTTON_GAP_X,
+          RIGHT_RESERVED_STATION_MODE
+        ),
+        style: {
+          fontSize: "13px",
+          fontWeight: "normal",
+          color: "#666666"
+        }
+      },
+      subtitle: {
+        text: null
+      },
+      yAxis: yAxis,
+      series: series,
+      plotOptions: makePlotOptions(axisOrder, GAP, START_TOP, totalAvailableHeight)
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // ALLE-MODUS: ÉIN PARAMETER, OPPTIL 8 STASJONAR UNDER KVARANDRE
+  // ---------------------------------------------------------------------------
+
+  function buildAllStationsSingleParameterOptions(stationApis, parameterKey, chart) {
+    const param = findParamByKey(parameterKey);
+
+    if (!param) {
+      return {
+        title: { text: "Ukjent parameter" },
+        subtitle: { text: null },
+        series: [],
+        yAxis: [],
+        plotOptions: {}
+      };
+    }
+
+    const limitedStationApis = stationApis.slice(0, MAX_STATIONS_IN_ALL_MODE);
+    const stationApisWithData = [];
+
+    for (let i = 0; i < limitedStationApis.length; i++) {
+      const api = limitedStationApis[i];
+      const data = api.series || {};
+
+      if (paramHasData(param, data)) {
+        stationApisWithData.push(api);
+      }
+    }
+
+    if (!stationApisWithData.length) {
+      return {
+        title: {
+          text: "Ingen data for " + param.label,
+          align: "left",
+          y: calculateTitleY(
+            chart,
+            getParameterModeButtonCount(stationApis),
+            PARAMETER_BUTTON_WIDTH,
+            PARAMETER_BUTTON_GAP_X,
+            RIGHT_RESERVED_PARAMETER_MODE
+          ),
+          style: {
+            fontSize: "13px",
+            fontWeight: "normal",
+            color: "#666666"
+          }
+        },
+        subtitle: { text: null },
+        series: [],
+        yAxis: [],
+        plotOptions: {}
+      };
+    }
+
+    if (param.key === "wind" && param.includeDirectionSubplotInAllMode) {
+      return buildAllStationsWindOptions(stationApisWithData, param, chart);
+    }
+
+    return buildAllStationsNormalParameterOptions(stationApisWithData, param, chart);
+  }
+
+  function buildAllStationsNormalParameterOptions(
+    stationApisWithData,
+    param,
+    chart
+  ) {
+    const GAP = 2;
+    const START_TOP = 0;
+    const totalAvailableHeight = 100;
+
+    const stationCount = stationApisWithData.length;
+
+    const gapsTotal =
+      GAP * Math.max(0, stationCount - 1);
+
+    const axisHeight =
+      (totalAvailableHeight - gapsTotal) /
+      stationCount;
+
+    const yAxis = [];
+    const series = [];
+    const axisOrder = [];
+
+    let currentTop = START_TOP;
+
+
+    // -------------------------------------------------------------------------
+    // Felles y-skala for alle parameter UNNTATT vannføring
+    // -------------------------------------------------------------------------
+
+    const sharedExtremes =
+      param.key === "discharge"
+        ? null
+        : calculateSharedExtremesForParam(
+            stationApisWithData,
+            param
+          );
+
+
+    // -------------------------------------------------------------------------
+    // Bygg eitt subplot per stasjon
+    // -------------------------------------------------------------------------
+
+    for (
+      let i = 0;
+      i < stationApisWithData.length;
+      i++
+    ) {
+      const api =
+        stationApisWithData[i];
+
+      const station =
+        api.station || {};
+
+      const data =
+        api.series || {};
+
+      const axisId =
+        param.key +
+        "_station_" +
+        i;
+
+      axisOrder.push(axisId);
+
+
+      // -----------------------------------------------------------------------
+      // Lag akse
+      // -----------------------------------------------------------------------
+
+      const axis =
+        makeStandardAxis(
+          param,
+          axisId,
+          currentTop,
+          axisHeight,
+          makeStationShortTitle(station)
+        );
+
+
+      // -----------------------------------------------------------------------
+      // Felles skala for alle parameter bortsett frå discharge
+      // -----------------------------------------------------------------------
+
+      if (sharedExtremes) {
+
+        axis.min =
+          sharedExtremes.min;
+
+        if (
+          sharedExtremes.max !== null &&
+          typeof sharedExtremes.max !==
+            "undefined"
+        ) {
+          axis.max =
+            sharedExtremes.max;
+        }
+      }
+
+
+      // -----------------------------------------------------------------------
+      // Vannføring:
+      // individuell skala + flomgrenser per stasjon
+      // -----------------------------------------------------------------------
+
+      if (param.key === "discharge") {
+
+        applyDischargeThresholds(
+          axis,
+          data.discharge
+        );
+      }
+
+
+      yAxis.push(axis);
+
+
+      // -----------------------------------------------------------------------
+      // Legg til serie
+      // -----------------------------------------------------------------------
+
+      addSeriesForParam({
+        param: param,
+        station: station,
+        data: data,
+        axisId: axisId,
+        series: series,
+        includeWindArrows: false
+      });
+
+
+      currentTop +=
+        axisHeight + GAP;
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Returner chart-options
+    // -------------------------------------------------------------------------
+
+    return {
+      title: {
+        text: param.label,
+
+        align: "left",
+
+        y: calculateTitleY(
+          chart,
+          getParameterModeButtonCount(
+            stationApis
+          ),
+          PARAMETER_BUTTON_WIDTH,
+          PARAMETER_BUTTON_GAP_X,
+          RIGHT_RESERVED_PARAMETER_MODE
+        ),
+
+        style: {
+          fontSize: "13px",
+          fontWeight: "normal",
+          color: "#666666"
+        }
+      },
+
+      subtitle: {
+        text: ""
+      },
+
+      yAxis: yAxis,
+
+      series: series,
+
+      plotOptions:
+        makePlotOptions(
+          axisOrder,
+          GAP,
+          START_TOP,
+          totalAvailableHeight
+        )
+    };
+  }
+
+  function buildAllStationsWindOptions(stationApisWithData, param, chart) {
+    const STATION_GAP = 2;
+    const AXIS_GAP_WITHIN_STATION = 0.8;
+    const START_TOP = 0;
+    const totalAvailableHeight = 100;
+
+    const stationCount = stationApisWithData.length;
+    const gapsBetweenStations = STATION_GAP * Math.max(0, stationCount - 1);
+    const stationBlockHeight = (totalAvailableHeight - gapsBetweenStations) / stationCount;
+
+    const directionAxisHeight = Math.max(2.5, Math.min(4.5, stationBlockHeight * 0.22));
+    const windAxisHeight = stationBlockHeight - directionAxisHeight - AXIS_GAP_WITHIN_STATION;
+
+    const yAxis = [];
+    const series = [];
+    const axisOrder = [];
+
+    let currentTop = START_TOP;
+
+    const directionParam = findParamByKey(param.directionKey || "wind_from_direction");
+    const sharedWindExtremes = calculateSharedExtremesForParam(stationApisWithData, param);
+
+    for (let i = 0; i < stationApisWithData.length; i++) {
+      const api = stationApisWithData[i];
+      const station = api.station || {};
+      const data = api.series || {};
+
+      const windAxisId = "wind_station_" + i;
+      const directionAxisId = "wind_direction_station_" + i;
+
+      axisOrder.push(windAxisId);
+      axisOrder.push(directionAxisId);
+
+      const windAxis = makeStandardAxis(
+        param,
+        windAxisId,
+        currentTop,
+        windAxisHeight,
+        makeStationShortTitle(station)
+      );
+
+      windAxis.min = sharedWindExtremes.min;
+
+      if (sharedWindExtremes.max !== null && typeof sharedWindExtremes.max !== "undefined") {
+        windAxis.max = sharedWindExtremes.max;
+      }
+      
+      yAxis.push(windAxis);
+
+      addSeriesForParam({
+        param: param,
+        station: station,
+        data: data,
+        axisId: windAxisId,
+        series: series,
+        includeWindArrows: false
+      });
+
+      const directionTop = currentTop + windAxisHeight + AXIS_GAP_WITHIN_STATION;
+
+      const directionAxis = {
+        id: directionAxisId,
+        top: directionTop + "%",
+        height: directionAxisHeight + "%",
+        lineWidth: 0,
+        gridLineWidth: 0,
+        title: { text: null },
+        offset: 0,
+        alignTicks: false,
+        labels: { enabled: false },
+        visible: true,
+        min: 0,
+        max: 1,
+        startOnTick: false,
+        endOnTick: false,
+        tickPositions: [],
+        minorGridLineWidth: 0,
+        margin: 0,
+        tickWidth: 0
+      };
+
+      yAxis.push(directionAxis);
+
+    if (
+      directionParam &&
+      seriesHasData(
+        data[directionParam.key]
+      )
+    ) {
+      series.push({
+        id:
+          "series_wind_direction_" +
+          directionAxisId,
+
+        name: makeSeriesName(
+          station,
+          "Vindretning"
+        ),
+
+        type: "scatter",
+
+        yAxis: directionAxisId,
+
+        data: makeWindArrowData(
+          data[directionParam.key].data,
+          directionParam.color
+        ),
+
+        color: directionParam.color,
+
+        zones: [],
+
+        lineWidth: 0,
+
+        enableMouseTracking: false,
+
+        marker: {
+          enabled: true
+        },
+
+        zIndex: 5,
+
+        showInLegend: false
+      });
+    }
+
+      currentTop += stationBlockHeight + STATION_GAP;
+    }
+
+    return {
+      title: {
+        text: "Vindhastighet, vindkast og vindretning",
+        align: "left",
+        y: calculateTitleY(
+          chart,
+          getParameterModeButtonCount(stationApis),
+          PARAMETER_BUTTON_WIDTH,
+          PARAMETER_BUTTON_GAP_X,
+          RIGHT_RESERVED_PARAMETER_MODE
+        ),
+        style: {
+          fontSize: "13px",
+          fontWeight: "normal",
+          color: "#666666"
+        }
+      },
+      subtitle: {
+        text: ""
+      },
+      yAxis: yAxis,
+      series: series,
+      plotOptions: makePlotOptions(axisOrder, STATION_GAP, START_TOP, totalAvailableHeight)
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // KNAPPAR
+  // ---------------------------------------------------------------------------
+
+  function makeStationModeButtons(chart, stationApis, selectedIndex) {
+  if (typeof selectedIndex === "undefined") {
+    selectedIndex = 0;
+  }
+
+  const maxButtonSlots = 24;
+  const buttonHeight = 26;
+
+  const stationButtonItems = makeStationButtonItems(stationApis);
+
+  const flowLayout = calculateFlowButtonLayout(
+    chart,
+    stationButtonItems,
+    STATION_BUTTON_MIN_WIDTH,
+    STATION_BUTTON_MAX_WIDTH,
+    BUTTON_GAP_X,
+    RIGHT_RESERVED_STATION_MODE
+  );
+
+  const titleY = calculateFlowTitleY(
+    chart,
+    stationButtonItems,
+    STATION_BUTTON_MIN_WIDTH,
+    STATION_BUTTON_MAX_WIDTH,
+    BUTTON_GAP_X,
+    RIGHT_RESERVED_STATION_MODE
+  );
+
+  const buttons = {};
+
+  buttons.station_all = {
+    text: "Parametervisning",
+    align: "left",
+    x: ACTION_BUTTON_LEFT_X,
+    y: TOP_ACTION_BUTTON_Y,
+    width: MODE_BUTTON_WIDTH,
+    height: buttonHeight,
+    theme: makeButtonTheme(false, true),
+    onclick: function() {
+      const defaultParameterKey = findDefaultParameterKeyForAllStations(stationApis);
+      switchToAllStationsParameter(this, stationApis, defaultParameterKey);
+    }
+  };
+
+  buttons.single_station_mode = makeHiddenButton();
+
+  addHiddenParameterButtons(buttons);
+
+  buttons.lastNedCSV = {
+    text: "Last ned data",
+    align: "left",
+    x: ACTION_BUTTON_LEFT_X + MODE_BUTTON_WIDTH + ACTION_BUTTON_GAP_X,
+    y: TOP_ACTION_BUTTON_Y,
+    width: DOWNLOAD_BUTTON_WIDTH,
+    height: buttonHeight,
+    theme: makeButtonTheme(false, true),
+    onclick: function() {
+      exportVisibleSeriesToCsv(this);
+    }
+  };
+
+  buttons.windrose = {
+  text: "Vindroser",
+  align: "left",
+  x:
+    ACTION_BUTTON_LEFT_X +
+    MODE_BUTTON_WIDTH +
+    ACTION_BUTTON_GAP_X +
+    DOWNLOAD_BUTTON_WIDTH +
+    ACTION_BUTTON_GAP_X,
+  y: TOP_ACTION_BUTTON_Y,
+  width: WINDROSE_BUTTON_WIDTH,
+  height: buttonHeight,
+  theme: makeButtonTheme(false, true),
+
+  onclick: function() {
+    showWindRoseOverlay(this, stationApis);
+  }
+  };
+
+  for (let i = 0; i < maxButtonSlots; i++) {
+    buttons["station_" + i] = makeHiddenButton();
+  }
+
+  for (let i = 0; i < flowLayout.items.length; i++) {
+    const layoutItem = flowLayout.items[i];
+    const stationIndex = layoutItem.index;
+    const api = stationApis[stationIndex];
+
+    if (!api) {
+      continue;
+    }
+
+    const isSelected = stationIndex === selectedIndex;
+
+    buttons["station_" + stationIndex] = {
+      text: layoutItem.text,
+      align: "left",
+      x: layoutItem.x,
+      y: layoutItem.y,
+      width: layoutItem.width,
+      height: buttonHeight,
+      theme: makeButtonTheme(isSelected, false),
+      onclick: function() {
+        switchStation(this, stationApis, stationIndex);
+      }
+    };
+  }
+
+  return buttons;
+}
+
+  function makeParameterModeButtons(chart, stationApis, selectedParameterKey) {
+  const maxButtonSlots = 24;
+  const buttonHeight = 26;
+
+  const parameterButtonItems = makeParameterButtonItems(stationApis);
+
+  const flowLayout = calculateFlowButtonLayout(
+    chart,
+    parameterButtonItems,
+    PARAMETER_BUTTON_MIN_WIDTH,
+    PARAMETER_BUTTON_MAX_WIDTH,
+    BUTTON_GAP_X,
+    RIGHT_RESERVED_PARAMETER_MODE
+  );
+
+  const titleY = calculateFlowTitleY(
+    chart,
+    parameterButtonItems,
+    PARAMETER_BUTTON_MIN_WIDTH,
+    PARAMETER_BUTTON_MAX_WIDTH,
+    BUTTON_GAP_X,
+    RIGHT_RESERVED_PARAMETER_MODE
+  );
+
+  const buttons = {};
+
+  buttons.station_all = makeHiddenButton();
+
+  for (let i = 0; i < maxButtonSlots; i++) {
+    buttons["station_" + i] = makeHiddenButton();
+  }
+
+  buttons.single_station_mode = {
+    text: "Stasjonsvisning",
+    align: "left",
+    x: ACTION_BUTTON_LEFT_X,
+    y: TOP_ACTION_BUTTON_Y,
+    width: MODE_BUTTON_WIDTH,
+    height: buttonHeight,
+    theme: makeButtonTheme(false, true),
+    onclick: function() {
+      switchToSingleStationMode(this, stationApis);
+    }
+  };
+
+  buttons.lastNedCSV = {
+    text: "Last ned data",
+    align: "left",
+    x: ACTION_BUTTON_LEFT_X + MODE_BUTTON_WIDTH + ACTION_BUTTON_GAP_X,
+    y: TOP_ACTION_BUTTON_Y,
+    width: DOWNLOAD_BUTTON_WIDTH,
+    height: buttonHeight,
+    theme: makeButtonTheme(false, true),
+    onclick: function() {
+      exportVisibleSeriesToCsv(this);
+    }
+  };
+
+  buttons.windrose = {
+  text: "Vindroser",
+  align: "left",
+  x:
+    ACTION_BUTTON_LEFT_X +
+    MODE_BUTTON_WIDTH +
+    ACTION_BUTTON_GAP_X +
+    DOWNLOAD_BUTTON_WIDTH +
+    ACTION_BUTTON_GAP_X,
+  y: TOP_ACTION_BUTTON_Y,
+  width: WINDROSE_BUTTON_WIDTH,
+  height: buttonHeight,
+  theme: makeButtonTheme(false, true),
+
+  onclick: function() {
+    showWindRoseOverlay(this, stationApis);
+  }
+  };
+
+  for (let pIndex = 0; pIndex < params.length; pIndex++) {
+    buttons["param_" + params[pIndex].key] = makeHiddenButton();
+  }
+
+  for (let i = 0; i < flowLayout.items.length; i++) {
+    const layoutItem = flowLayout.items[i];
+    const param = layoutItem.item.param;
+
+    buttons["param_" + param.key] = {
+      text: layoutItem.text,
+      align: "left",
+      x: layoutItem.x,
+      y: layoutItem.y,
+      width: layoutItem.width,
+      height: buttonHeight,
+      theme: makeButtonTheme(param.key === selectedParameterKey, false),
+      onclick: function() {
+        switchToAllStationsParameter(this, stationApis, param.key);
+      }
+    };
+  }
+
+  return buttons;
+}
+
+  function addHiddenParameterButtons(buttons) {
+    for (let i = 0; i < params.length; i++) {
+      buttons["param_" + params[i].key] = makeHiddenButton();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // BYTTE MELLOM MODUS / VISNING
+  // ---------------------------------------------------------------------------
+  function syncWeatherHighlight(chart) {
+    if (chart.weatherExpressionRevision === weatherExpressionRevision) {
+      return;
+    }
+
+    // Set vakta før opprydding; vanleg redraw skal ikkje nullstille modusvalet.
+    chart.weatherExpressionRevision = weatherExpressionRevision;
+    disableStationHoverHighlight(chart);
+    closeWindRoseOverlay(chart, false);
+    chart.weatherActiveStation = stationApis.length
+      ? stationApis[0].station
+      : null;
+
+    if (chart.weatherActiveStation) {
+      enableSingleStationHoverHighlight(chart);
+    }
+    notifyStationSelected(chart.weatherActiveStation);
+  }
+
+  function destroyWeatherHighlight(chart) {
+    disableStationHoverHighlight(chart);
+    closeWindRoseOverlay(chart, false);
+    chart.weatherActiveStation = null;
+    notifyStationsSelected([]);
+  }
+
+  function notifyStationsSelected(stations) {
+      const ids = [];
+
+      for (let i = 0; i < stations.length; i++) {
+          const station = stations[i];
+
+          if (!station || station.source_id === null ||
+              typeof station.source_id === "undefined") {
+              continue;
+          }
+          // Evaluate Expression kan overstyre namnet String.
+          const id = ("" + station.source_id).trim();
+          if (id && ids.indexOf(id) === -1) {
+              ids.push(id);
+          }
+      }
+
+      const event = window.document.createEvent("CustomEvent");
+
+      event.initCustomEvent(
+          "weather-station-selected",
+          false,
+          false,
+          {
+              source_ids: ids,
+              source_id: ids.length === 1 ? ids[0] : null
+          }
+      );
+
+      window.dispatchEvent(event);
+  }
+
+  function notifyStationSelected(station) {
+      notifyStationsSelected(station ? [station] : []);
+  }
+  function switchStation(chart, stationApis, stationIndex) {
+    disableStationHoverHighlight(chart);
+    const api = stationApis[stationIndex];
+
+    if (!api) {
+      return;
+    }
+
+    chart.weatherActiveStation = api.station;
+    enableSingleStationHoverHighlight(chart);
+    notifyStationSelected(api.station);
+
+    const nextOptions = buildStationSpecificOptions(api, chart);
+
+    clearChartAxesAndSeries(chart);
+
+    for (let i = 0; i < nextOptions.yAxis.length; i++) {
+      chart.addAxis(nextOptions.yAxis[i], false, false);
+    }
+
+    for (let i = 0; i < nextOptions.series.length; i++) {
+      chart.addSeries(nextOptions.series[i], false);
+    }
+
+    chart.setTitle(nextOptions.title, nextOptions.subtitle, false);
+
+    chart.update({
+      chart: {
+        marginTop: calculateChartMarginTop(
+          chart,
+          getSingleModeButtonCount(stationApis),
+          STATION_BUTTON_WIDTH,
+          STATION_BUTTON_GAP_X,
+          RIGHT_RESERVED_STATION_MODE
+        )
+      },
+      plotOptions: nextOptions.plotOptions,
+      exporting: {
+        buttons: makeStationModeButtons(chart, stationApis, stationIndex)
+      },
+      legend: {
+        enabled: false
+      }
+    }, false);
+
+    chart.redraw();
+  }
+
+  function switchToAllStationsParameter(chart, stationApis, parameterKey) {
+    const nextOptions = buildAllStationsSingleParameterOptions(stationApis, parameterKey, chart);
+
+    clearChartAxesAndSeries(chart);
+
+    for (let i = 0; i < nextOptions.yAxis.length; i++) {
+      chart.addAxis(nextOptions.yAxis[i], false, false);
+    }
+
+    for (let i = 0; i < nextOptions.series.length; i++) {
+      chart.addSeries(nextOptions.series[i], false);
+    }
+
+    chart.setTitle(nextOptions.title, nextOptions.subtitle, false);
+
+    chart.update({
+      chart: {
+        marginTop: calculateChartMarginTop(
+          chart,
+          getParameterModeButtonCount(stationApis),
+          PARAMETER_BUTTON_WIDTH,
+          PARAMETER_BUTTON_GAP_X,
+          RIGHT_RESERVED_PARAMETER_MODE
+        )
+      },
+      plotOptions: nextOptions.plotOptions,
+      exporting: {
+        buttons: makeParameterModeButtons(chart, stationApis, parameterKey)
+      },
+      legend: {
+        enabled: false
+      }
+    }, false);
+
+    chart.redraw();
+
+    if (chart.weatherActiveStation) {
+        notifyStationSelected(chart.weatherActiveStation);
+    } else {
+        notifyStationsSelected([]);
+    }
+    enableStationHoverHighlight(chart, stationApis, parameterKey);
+  }
+
+  function switchToSingleStationMode(chart, stationApis) {
+    switchStation(chart, stationApis, 0);
+  }
+
+  function clearChartAxesAndSeries(chart) {
+    while (chart.series.length > 0) {
+      chart.series[0].remove(false);
+    }
+
+    while (chart.yAxis.length > 0) {
+      chart.yAxis[0].remove(false);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // SERIES / AKSAR
+  // ---------------------------------------------------------------------------
+
+  function makeStandardAxis(param, axisId, top, height, titleText) {
+    return {
+      id: axisId,
+      top: top + "%",
+      height: height + "%",
+      lineWidth: 1,
+      gridLineWidth: 1,
+      title: { text: titleText },
+      offset: 0,
+      alignTicks: false,
+      labels: { x: -5 },
+      visible: true,
+      fixedHeight: param.fixedHeight,
+      min: param.min,
+      softMax: param.softMax
+    };
+  }
+
+  function applyWindDirectionAxisStyle(axis) {
+    axis.min = 0;
+    axis.max = 1;
+    axis.startOnTick = false;
+    axis.title = { text: null };
+    axis.endOnTick = false;
+    axis.tickPositions = [];
+    axis.labels = { enabled: false };
+    axis.gridLineWidth = 0;
+    axis.minorGridLineWidth = 0;
+    axis.margin = 0;
+    axis.lineWidth = 0;
+    axis.tickWidth = 0;
+  }
+
+  function addSeriesForParam(options) {
+    const param = options.param;
+    const station = options.station;
+    const data = options.data;
+    const axisId = options.axisId;
+    const series = options.series;
+    const includeWindArrows = options.includeWindArrows;
+
+
+    // -------------------------------------------------------------------------
+    // PARAMETER MED FLEIRE SERIAR, T.D. TEMPERATUR ELLER VIND + VINDKAST
+    // -------------------------------------------------------------------------
+
+    if (param.members && param.members.length) {
+
+      for (let j = 0; j < param.members.length; j++) {
+        const member = param.members[j];
+        const memberItem = data[member.key];
+
+        // Bruk original vindkastserie om begge namna finst, for å unngå doble kurver.
+        if (member.fallbackFor && seriesHasData(data[member.fallbackFor])) {
+          continue;
+        }
+
+        if (!seriesHasData(memberItem)) {
+          continue;
+        }
+
+        series.push({
+          id:
+            "series_" +
+            member.key +
+            "_" +
+            axisId,
+
+          name: makeSeriesName(
+            station,
+            member.label
+          ),
+
+          type: param.type,
+          yAxis: axisId,
+
+          data: makeHighchartsData(
+            memberItem.data
+          ),
+
+          color: member.color,
+
+          // Reset verdiar som kan henge igjen
+          zones: param.temperatureZones
+            ? [{ value: 0, color: "#2563eb" }, { color: "#dc2626" }]
+            : [],
+          zoneAxis: "y",
+
+          step: false,
+
+          dashStyle:
+            member.dashStyle || "Solid",
+
+          lineWidth: 2,
+
+          marker: {
+            enabled: false
+          },
+
+          enableMouseTracking: true,
+
+          showInLegend: true,
+
+          zIndex: 2,
+
+          tooltip: {
+            valueDecimals: 1,
+
+            valueSuffix:
+              memberItem.unit
+                ? " " + memberItem.unit
+                : ""
+          }
+        });
+      }
+
+      return;
+    }
+
+
+    // -------------------------------------------------------------------------
+    // VANLEG PARAMETER
+    // -------------------------------------------------------------------------
+
+    const item = data[param.key];
+
+    if (!seriesHasData(item)) {
+      return;
+    }
+
+
+    // -------------------------------------------------------------------------
+    // DISCHARGE REFERANSEDATA
+    // -------------------------------------------------------------------------
+
+    if (param.key === "discharge") {
+      addDischargePercentiles({
+        dischargeItem: item,
+        axisId: axisId,
+        series: series,
+        station: station
+      });
+    }
+
+
+    const rawData = item.data || [];
+
+
+    // -------------------------------------------------------------------------
+    // VINDPILER
+    // -------------------------------------------------------------------------
+
+    if (param.windArrows) {
+
+      if (!includeWindArrows) {
+        return;
+      }
+
+      series.push({
+        id:
+          "series_wind_direction_" +
+          axisId,
+
+        name: makeSeriesName(
+          station,
+          param.label
+        ),
+
+        type: "scatter",
+
+        yAxis: axisId,
+
+        data: makeWindArrowData(
+          rawData,
+          param.color
+        ),
+
+        color: param.color,
+
+        zones: [],
+
+        lineWidth: 0,
+
+        enableMouseTracking: false,
+
+        marker: {
+          enabled: true
+        },
+
+        zIndex: 5,
+
+        showInLegend: false
+      });
+
+      return;
+    }
+
+
+    // -------------------------------------------------------------------------
+    // GRUNNSERIE
+    // -------------------------------------------------------------------------
+
+    const baseSeries = {
+      id:
+        "series_" +
+        param.key +
+        "_" +
+        axisId,
+
+      name: makeSeriesName(
+        station,
+        param.label
+      ),
+
+      type: param.type,
+
+      yAxis: axisId,
+
+      data: makeHighchartsData(
+        rawData
+      ),
+
+      // -------------------------------------------------------
+      // Eksplisitt reset av eigenskapar
+      // -------------------------------------------------------
+
+      color: param.color,
+
+      zones: [],
+
+      zoneAxis: "y",
+
+      dashStyle:
+        param.dashStyle || "Solid",
+
+      step: false,
+
+      lineWidth: 2,
+
+      enableMouseTracking: true,
+
+      showInLegend: true,
+
+      zIndex:
+        param.key === "discharge"
+          ? 3
+          : 2,
+
+      marker: {
+        enabled: false
+      },
+
+      tooltip: {
+        valueDecimals: 1,
+
+        valueSuffix:
+          item.unit
+            ? " " + item.unit
+            : ""
+      }
+    };
+
+
+    // -------------------------------------------------------------------------
+    // TEMPERATUR
+    // -------------------------------------------------------------------------
+
+    if (param.temperatureZones) {
+
+      baseSeries.color = null;
+
+      baseSeries.zones = [
+        {
+          value: 0,
+          color: "#2563eb"
+        },
+        {
+          color: "#dc2626"
+        }
+      ];
+    }
+
+
+    // -------------------------------------------------------------------------
+    // NEDBØR / COLUMN
+    // -------------------------------------------------------------------------
+
+    if (param.type === "column") {
+
+      baseSeries.borderWidth = 0;
+
+      baseSeries.pointPadding = 0.1;
+
+      baseSeries.groupPadding = 0.05;
+
+      baseSeries.pointRange =
+        1 * 3600 * 1000;
+
+      baseSeries.lineWidth = 0;
+    }
+
+
+    series.push(baseSeries);
+  }
+
+  function makePlotOptions(axisOrder, GAP, START_TOP, totalAvailableHeight) {
+    return {
+      series: {
+        states: {
+          inactive: { opacity: 1 }
+        },
+        events: {
+          legendItemClick: function(e) {
+            const chart = this.chart;
+            const clickedSeries = this;
+            const clickedAxis = clickedSeries.yAxis;
+
+            e.preventDefault();
+
+            clickedSeries.setVisible(!clickedSeries.visible, false);
+
+            let anyVisibleOnAxis = false;
+
+            for (let i = 0; i < chart.series.length; i++) {
+              const s = chart.series[i];
+
+              if (s.visible && s.yAxis === clickedAxis) {
+                anyVisibleOnAxis = true;
+                break;
+              }
+            }
+
+            clickedAxis.update({ visible: anyVisibleOnAxis }, false);
+
+            resizeVisibleAxes(chart, axisOrder, GAP, START_TOP, totalAvailableHeight);
+
+            chart.redraw();
+
+            return false;
+          }
+        }
+      },
+
+      column: {
+        pointPadding: 0.1,
+        groupPadding: 0.05
+      },
+
+      spline: {
+        marker: { enabled: false }
+      },
+
+      line: {
+        marker: { enabled: false }
+      },
+
+      scatter: {
+        marker: { enabled: true }
+      }
+    };
+  }
+
+  function resizeVisibleAxes(chart, axisOrder, GAP, START_TOP, totalAvailableHeight) {
+    const visibleAxes = [];
+
+    for (let i = 0; i < chart.yAxis.length; i++) {
+      const ax = chart.yAxis[i];
+
+      if (ax.visible) {
+        visibleAxes.push(ax);
+      }
+    }
+
+    visibleAxes.sort(function(a, b) {
+      return getAxisOrderIndex(axisOrder, a.options.id) - getAxisOrderIndex(axisOrder, b.options.id);
+    });
+
+    let usedFixedHeight = 0;
+    let flexAxisCount = 0;
+
+    for (let i = 0; i < visibleAxes.length; i++) {
+      const ax = visibleAxes[i];
+
+      if (ax.options.fixedHeight) {
+        usedFixedHeight += ax.options.fixedHeight;
+      } else {
+        flexAxisCount++;
+      }
+    }
+
+    const gapsTotal = GAP * Math.max(0, visibleAxes.length - 1);
+    const flexHeightTotal = totalAvailableHeight - usedFixedHeight - gapsTotal;
+    const eachFlexHeight = flexAxisCount > 0 ? flexHeightTotal / flexAxisCount : 0;
+
+    let tTop = START_TOP;
+
+    for (let i = 0; i < visibleAxes.length; i++) {
+      const ax = visibleAxes[i];
+      const height = ax.options.fixedHeight || eachFlexHeight;
+
+      ax.update({
+        top: tTop + "%",
+        height: height + "%"
+      }, false);
+
+      tTop += height + GAP;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // DATAHANDTERING
+  // ---------------------------------------------------------------------------
+
+  function normalizeStationApis(raw) {
+    if (!raw) {
+      return [];
+    }
+
+    if (isArray(raw)) {
+      return raw;
+    }
+
+    if (raw.stations && isArray(raw.stations)) {
+      return raw.stations;
+    }
+
+    if (raw.items && isArray(raw.items)) {
+      return raw.items;
+    }
+
+    if (raw.data && isArray(raw.data)) {
+      return raw.data;
+    }
+
+    if (raw.results && isArray(raw.results)) {
+      return raw.results;
+    }
+
+    return [raw];
+  }
+
+  function paramHasData(param, data) {
+    if (param.members && param.members.length) {
+      for (let i = 0; i < param.members.length; i++) {
+        const member = param.members[i];
+
+        if (seriesHasData(data[member.key])) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    return seriesHasData(data[param.key]);
+  }
+
+  function seriesHasData(item) {
+    return !!(
+      item &&
+      item.data &&
+      item.data.length &&
+      item.data.length > 0
+    );
+  }
+
+  function makeHighchartsData(rawData) {
+    const result = [];
+
+    if (!rawData || !rawData.length) {
+      return result;
+    }
+
+    for (let i = 0; i < rawData.length; i++) {
+      const p = rawData[i];
+      const t = getTime(p);
+      const v = getValue(p);
+
+      if (
+        isValidNumber(t) &&
+        v !== null &&
+        typeof v !== "undefined"
+      ) {
+        result.push([t, v]);
+      }
+    }
+
+    return result;
+  }
+
+  function makeWindArrowData(rawData, color) {
+    const result = [];
+
+    if (!rawData || !rawData.length) {
+      return result;
+    }
+
+    for (let i = 0; i < rawData.length; i += 3) {
+      const p = rawData[i];
+      const t = getTime(p);
+      const dir = getValue(p);
+
+      if (!isValidNumber(t)) {
+        continue;
+      }
+
+      const rot = ((dir || 0) + 180) % 360;
+      const size = 18;
+      const url = svgArrowDataUrl(rot, size, color);
+
+      result.push({
+        x: t,
+        y: 0.5,
+        marker: {
+          enabled: true,
+          symbol: "url(" + url + ")",
+          width: size,
+          height: size
+        }
+      });
+    }
+
+    return result;
+  }
+
+  function getTime(p) {
+    if (isArray(p)) {
+      if (typeof p[0] === "number") {
+        return p[0];
+      }
+
+      return Date.parse(p[0]);
+    }
+
+    if (!p) {
+      return null;
+    }
+
+    const raw =
+      p.time ||
+      p.datetime ||
+      p.date ||
+      p.timestamp ||
+      p.x ||
+      p.referenceTime;
+
+    if (typeof raw === "number") {
+      return raw;
+    }
+
+    return Date.parse(raw);
+  }
+
+  function getValue(p) {
+    if (isArray(p)) {
+      return p[1];
+    }
+
+    if (!p) {
+      return null;
+    }
+
+    if (typeof p.value !== "undefined") {
+      return p.value;
+    }
+
+    if (typeof p.y !== "undefined") {
+      return p.y;
+    }
+
+    if (typeof p.observation !== "undefined") {
+      return p.observation;
+    }
+
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // HJELPEFUNKSJONAR
+  // ---------------------------------------------------------------------------
+
+  function findParamByKey(key) {
+    for (let i = 0; i < params.length; i++) {
+      if (params[i].key === key) {
+        return params[i];
+      }
+    }
+
+    return null;
+  }
+
+  function parameterExistsInAnyStation(stationApis, param) {
+    const limitedStationApis = stationApis.slice(0, MAX_STATIONS_IN_ALL_MODE);
+
+    for (let i = 0; i < limitedStationApis.length; i++) {
+      const api = limitedStationApis[i];
+      const data = api.series || {};
+
+      if (paramHasData(param, data)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function findDefaultParameterKeyForAllStations(stationApis) {
+    const preferredOrder = [
+      "precipitation_1h",
+      "air_temperature",
+      "wind",
+      "snow_depth",
+      "snow_drift",
+      "snow_drift_cumsum",
+      "snow_drift_wind",
+      "precipitation_accumulated",
+      "discharge",
+      "groundwater_level"
+    ];
+
+    for (let i = 0; i < preferredOrder.length; i++) {
+      const param = findParamByKey(preferredOrder[i]);
+
+      if (param && parameterExistsInAnyStation(stationApis, param)) {
+        return param.key;
+      }
+    }
+
+    for (let j = 0; j < params.length; j++) {
+      const p = params[j];
+
+      if (!p.windArrows && parameterExistsInAnyStation(stationApis, p)) {
+        return p.key;
+      }
+    }
+
+    return "air_temperature";
+  }
+
+  function isArray(v) {
+    return Object.prototype.toString.call(v) === "[object Array]";
+  }
+
+  function isValidNumber(v) {
+    return typeof v === "number" && v === v && v !== Infinity && v !== -Infinity;
+  }
+
+  function makeSeriesName(station, label) {
+    const stationName = station.name || station.source_id || "Værstasjon";
+
+    return stationName + " - " + label;
+  }
+
+  function makeStationButtonText(station, index) {
+    let text = "";
+
+    if (station.name) {
+      text = station.name;
+    } else if (station.source_id) {
+      text = station.source_id;
+    } else {
+      text = "Stasjon " + (index + 1);
+    }
+
+    if (text.length > 22) {
+      text = text.substring(0, 21) + "…";
+    }
+
+    return text;
+  }
+
+  function makeParameterButtonText(param) {
+    return param.shortLabel || param.label || param.key;
+  }
+
+  function makeStationMetaTitle(station) {
+    const parts = [];
+
+    if (station.name) {
+      parts.push(station.name);
+    }
+
+    if (station.stationholder) {
+      parts.push(station.stationholder);
+    }
+
+    if (station.source_id) {
+      parts.push(station.source_id);
+    }
+
+    if (station.masl !== undefined && station.masl !== null) {
+      parts.push(station.masl + " moh.");
+    }
+
+    if (!parts.length) {
+      return "";
+    }
+
+    return parts.join(" · ");
+  }
+
+  function makeStationShortTitle(station) {
+    let text = station.name || station.source_id || "Værstasjon";
+
+    if (station.masl !== undefined && station.masl !== null) {
+      text += " · " + station.masl + " moh.";
+    }
+
+    return text;
+  }
+
+  function getAxisOrderIndex(axisOrder, id) {
+    for (let i = 0; i < axisOrder.length; i++) {
+      if (axisOrder[i] === id) {
+        return i;
+      }
+    }
+
+    return 9999;
+  }
+
+  function svgArrowDataUrl(rot, size, color) {
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="' + size + '" height="' + size + '" viewBox="0 0 16 16">' +
+        '<g transform="translate(8,8) rotate(' + rot + ')">' +
+          '<path d="M0,-6 L3,2 L0,0 L-3,2 Z" fill="' + color + '" />' +
+        '</g>' +
+      '</svg>';
+
+    return "data:image/svg+xml;utf8," + encodeURIComponent(svg);
+  }
+
+  // ---------------------------------------------------------------------------
+  // DYNAMISK KNAPPELAYOUT
+  // ---------------------------------------------------------------------------
+
+  function getChartWidth(chart) {
+    if (chart && typeof chart.chartWidth === "number" && chart.chartWidth > 0) {
+      return chart.chartWidth;
+    }
+
+    return DEFAULT_CHART_WIDTH;
+  }
+
+  function estimateButtonWidth(text, minWidth, maxWidth) {
+  const safeText = text || "";
+
+  // Grovt estimat: ca. 7 px per teikn + padding
+  let width = safeText.length * 7 + 24;
+
+  if (width < minWidth) {
+    width = minWidth;
+  }
+
+  if (width > maxWidth) {
+    width = maxWidth;
+  }
+
+  return width;
+}
+
+function calculateFlowButtonLayout(chart, buttonItems, minWidth, maxWidth, gapX, reservedRightWidth) {
+  const chartWidth = getChartWidth(chart);
+
+  const availableWidth = Math.max(
+    minWidth,
+    chartWidth - BUTTON_START_X - reservedRightWidth
+  );
+
+  const positionedItems = [];
+
+  let currentX = BUTTON_START_X;
+  let currentY = BUTTON_START_Y;
+  let rowCount = 1;
+
+  for (let i = 0; i < buttonItems.length; i++) {
+    const item = buttonItems[i];
+    const width = estimateButtonWidth(item.text, minWidth, maxWidth);
+
+    const wouldOverflow =
+      currentX > BUTTON_START_X &&
+      currentX + width > BUTTON_START_X + availableWidth;
+
+    if (wouldOverflow) {
+      currentX = BUTTON_START_X;
+      currentY += BUTTON_ROW_HEIGHT;
+      rowCount++;
+    }
+
+    positionedItems.push({
+      key: item.key,
+      index: item.index,
+      text: item.text,
+      x: currentX,
+      y: currentY,
+      width: width,
+      item: item
+    });
+
+    currentX += width + gapX;
+  }
+
+  return {
+    items: positionedItems,
+    rows: rowCount
+  };
+}
+
+function calculateFlowChartMarginTop(chart, buttonItems, minWidth, maxWidth, gapX, reservedRightWidth) {
+  const layout = calculateFlowButtonLayout(
+    chart,
+    buttonItems,
+    minWidth,
+    maxWidth,
+    gapX,
+    reservedRightWidth
+  );
+
+  const titleSpace = 34;
+  const bottomPadding = 12;
+
+  const buttonAreaHeight =
+    BUTTON_START_Y + layout.rows * BUTTON_ROW_HEIGHT;
+
+  return buttonAreaHeight + titleSpace + bottomPadding;
+}
+
+function calculateFlowTitleY(chart, buttonItems, minWidth, maxWidth, gapX, reservedRightWidth) {
+  const layout = calculateFlowButtonLayout(
+    chart,
+    buttonItems,
+    minWidth,
+    maxWidth,
+    gapX,
+    reservedRightWidth
+  );
+
+  return BUTTON_START_Y + layout.rows * BUTTON_ROW_HEIGHT + 16;
+}
+
+  function calculateToolbarLayout(chart, buttonCount, buttonWidth, buttonGapX, reservedRightWidth) {
+    const chartWidth = getChartWidth(chart);
+
+    const availableWidth = Math.max(
+      buttonWidth,
+      chartWidth - BUTTON_START_X - reservedRightWidth
+    );
+
+    const buttonsPerRow = Math.max(
+      1,
+      Math.floor((availableWidth + buttonGapX) / (buttonWidth + buttonGapX))
+    );
+
+    const rows = Math.max(
+      1,
+      Math.ceil(buttonCount / buttonsPerRow)
+    );
+
+    return {
+      startX: BUTTON_START_X,
+      startY: BUTTON_START_Y,
+      rowHeight: BUTTON_ROW_HEIGHT,
+      buttonWidth: buttonWidth,
+      buttonGapX: buttonGapX,
+      buttonsPerRow: buttonsPerRow,
+      rows: rows
+    };
+  }
+
+  function makeStationButtonItems(stationApis) {
+  const items = [];
+
+  for (let i = 0; i < stationApis.length; i++) {
+    const api = stationApis[i];
+    const station = api.station || {};
+
+    items.push({
+      key: "station_" + i,
+      index: i,
+      text: makeStationButtonText(station, i),
+      station: station
+    });
+  }
+
+  return items;
+}
+
+function makeParameterButtonItems(stationApis) {
+  const items = [];
+
+  for (let pIndex = 0; pIndex < params.length; pIndex++) {
+    const param = params[pIndex];
+
+    if (param.windArrows) {
+      continue;
+    }
+
+    if (!parameterExistsInAnyStation(stationApis, param)) {
+      continue;
+    }
+
+    items.push({
+      key: "param_" + param.key,
+      index: pIndex,
+      text: makeParameterButtonText(param),
+      param: param
+    });
+  }
+
+  return items;
+}
+
+  function getButtonPosition(index, layout) {
+    const row = Math.floor(index / layout.buttonsPerRow);
+    const col = index % layout.buttonsPerRow;
+
+    return {
+      x: layout.startX + col * (layout.buttonWidth + layout.buttonGapX),
+      y: layout.startY + row * layout.rowHeight
+    };
+  }
+
+  function calculateChartMarginTop(chart, buttonCount, buttonWidth, buttonGapX, reservedRightWidth) {
+    const layout = calculateToolbarLayout(
+      chart,
+      buttonCount,
+      buttonWidth,
+      buttonGapX,
+      reservedRightWidth
+    );
+
+    const titleSpace = 50;
+    const bottomPadding = 12;
+
+    const buttonAreaHeight =
+      BUTTON_START_Y + layout.rows * BUTTON_ROW_HEIGHT;
+
+    return buttonAreaHeight + titleSpace + bottomPadding;
+  }
+
+  function calculateTitleY(chart, buttonCount, buttonWidth, buttonGapX, reservedRightWidth) {
+    const layout = calculateToolbarLayout(
+      chart,
+      buttonCount,
+      buttonWidth,
+      buttonGapX,
+      reservedRightWidth
+    );
+
+    return BUTTON_START_Y + layout.rows * BUTTON_ROW_HEIGHT + 22;
+  }
+
+  function getSingleModeButtonCount(stationApis) {
+    return stationApis.length;
+  }
+
+  function getParameterModeButtonCount(stationApis) {
+    let count = 0;
+
+    for (let i = 0; i < params.length; i++) {
+      const param = params[i];
+
+      if (param.windArrows) {
+        continue;
+      }
+
+      if (parameterExistsInAnyStation(stationApis, param)) {
+        count++;
+      }
+    }
+
+    return count;
+  }
+
+  function calculateAxisHeights(activeParams, GAP, totalAvailableHeight) {
+    const result = [];
+
+    const gapsTotal = GAP * Math.max(0, activeParams.length - 1);
+    const availableHeight = totalAvailableHeight - gapsTotal;
+
+    let fixedHeightSum = 0;
+    let flexCount = 0;
+
+    for (let i = 0; i < activeParams.length; i++) {
+      const p = activeParams[i];
+
+      if (p.fixedHeight) {
+        fixedHeightSum += p.fixedHeight;
+      } else {
+        flexCount++;
+      }
+    }
+
+    const availableFlexHeight = availableHeight - fixedHeightSum;
+    const defaultFlexHeight = flexCount > 0 ? availableFlexHeight / flexCount : 0;
+
+    for (let i = 0; i < activeParams.length; i++) {
+      const p = activeParams[i];
+      let height = p.fixedHeight || defaultFlexHeight;
+
+      if (p.maxHeight && height > p.maxHeight) {
+        height = p.maxHeight;
+      }
+
+      result.push(height);
+    }
+
+    return result;
+  }
+
+  // ---------------------------------------------------------------------------
+  // CSV-EKSPORT
+  // ---------------------------------------------------------------------------
+
+  function exportVisibleSeriesToCsv(chart) {
+    const visibleSeries = [];
+
+    for (let i = 0; i < chart.series.length; i++) {
+      const s = chart.series[i];
+
+      if (s.visible && s.data && s.data.length > 0) {
+        let hasValidPoints = false;
+
+        for (let j = 0; j < s.data.length; j++) {
+          const p = s.data[j];
+
+          if (
+            p &&
+            typeof p.x !== "undefined" &&
+            typeof p.y !== "undefined"
+          ) {
+            hasValidPoints = true;
+            break;
+          }
+        }
+
+        if (hasValidPoints) {
+          visibleSeries.push(s);
+        }
+      }
+    }
+
+    if (visibleSeries.length === 0) {
+      alert("Ingen synlige dataserier å eksportere.");
+      return;
+    }
+
+    const timestamps = [];
+
+    for (let i = 0; i < visibleSeries.length; i++) {
+      const s = visibleSeries[i];
+
+      for (let j = 0; j < s.data.length; j++) {
+        const p = s.data[j];
+
+        if (p && typeof p.x !== "undefined") {
+          if (!timestampExists(timestamps, p.x)) {
+            timestamps.push(p.x);
+          }
+        }
+      }
+    }
+
+    timestamps.sort(function(a, b) {
+      return a - b;
+    });
+
+    const header = ["Dato/tid"];
+
+    for (let i = 0; i < visibleSeries.length; i++) {
+      header.push(visibleSeries[i].name);
+    }
+
+    const rows = [];
+
+    for (let i = 0; i < timestamps.length; i++) {
+      const ts = timestamps[i];
+      const date = new Date(ts);
+      const formattedDate = date.toISOString().replace("T", " ").substring(0, 16);
+
+      const row = [formattedDate];
+
+      for (let j = 0; j < visibleSeries.length; j++) {
+        const s = visibleSeries[j];
+        const point = findPointByTimestamp(s, ts);
+
+        if (point) {
+          row.push(point.y);
+        } else {
+          row.push("");
+        }
+      }
+
+      rows.push(row.join(","));
+    }
+
+    const csv = header.join(",") + "\n" + rows.join("\n");
+
+    const csvContent =
+      "data:text/csv;charset=utf-8," + encodeURIComponent(csv);
+
+    const link = document.createElement("a");
+    link.href = csvContent;
+    link.download = "vaerdata.csv";
+    link.style.display = "none";
+
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
+  function timestampExists(timestamps, value) {
+    for (let i = 0; i < timestamps.length; i++) {
+      if (timestamps[i] === value) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function findPointByTimestamp(series, timestamp) {
+    for (let i = 0; i < series.data.length; i++) {
+      const p = series.data[i];
+
+      if (p && p.x === timestamp) {
+        return p;
+      }
+    }
+
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // KNAPPETEMA / SKJULTE KNAPPAR
+  // ---------------------------------------------------------------------------
+
+  function makeButtonTheme(isSelected, isUtilityButton) {
+    if (isUtilityButton) {
+      return {
+        fill: "#ffffff",
+        stroke: "#868686",
+        "stroke-width": 1,
+        r: 0,
+        padding: 6,
+        style: {
+          color: "#111827",
+          fontSize: "11px",
+          fontWeight: "normal"
+        },
+        states: {
+          hover: {
+            fill: "#f1f5f9",
+            stroke: "#727272",
+            "stroke-width": 1.5,
+            style: {
+              color: "#111827"
+            }
+          }
+        }
+      };
+    }
+
+    return {
+      fill: isSelected ? "#444f55" : "#ffffff",
+      stroke: isSelected ? "#000000" : "#444f55",
+      "stroke-width": isSelected ? 2 : 1,
+      r: 0,
+      padding: 6,
+      style: {
+        color: isSelected ? "#ffffff" : "#444f55",
+        fontSize: "12px",
+        fontWeight: isSelected ? "bold" : "normal",
+        textOverflow: "ellipsis"
+      },
+      states: {
+        hover: {
+          fill: isSelected ? "#696969" : "#f1f5f9",
+          stroke: "#444f55",
+          "stroke-width": 2,
+          style: {
+            color: "#111827",
+            fontWeight: "bold"
+          }
+        }
+      }
+    };
+  }
+
+  function makeHiddenButton() {
+    return {
+      text: "",
+      align: "left",
+      x: -9999,
+      y: -9999,
+      width: 1,
+      height: 1,
+      theme: {
+        fill: "rgba(255,255,255,0)",
+        stroke: "rgba(255,255,255,0)",
+        "stroke-width": 0,
+        padding: 0,
+        style: {
+          color: "rgba(255,255,255,0)",
+          fontSize: "1px"
+        },
+        states: {
+          hover: {
+            fill: "rgba(255,255,255,0)",
+            stroke: "rgba(255,255,255,0)"
+          }
+        }
+      },
+      onclick: function() {
+        return false;
+      }
+    };
+  }
+function calculateSharedExtremesForParam(stationApisWithData, param) {
+  let minValue = null;
+  let maxValue = null;
+
+  for (let i = 0; i < stationApisWithData.length; i++) {
+    const api = stationApisWithData[i];
+    const data = api.series || {};
+
+    if (param.members && param.members.length) {
+      for (let m = 0; m < param.members.length; m++) {
+        const member = param.members[m];
+        const item = data[member.key];
+
+        updateMinMaxFromSeries(item, function(v) {
+          if (minValue === null || v < minValue) {
+            minValue = v;
+          }
+
+          if (maxValue === null || v > maxValue) {
+            maxValue = v;
+          }
+        });
+      }
+    } else {
+      const item = data[param.key];
+
+      updateMinMaxFromSeries(item, function(v) {
+        if (minValue === null || v < minValue) {
+          minValue = v;
+        }
+
+        if (maxValue === null || v > maxValue) {
+          maxValue = v;
+        }
+      });
+    }
+
+    // Ta også med flomtersklar når felles skala for vannføring blir rekna ut
+    if (param.key === "discharge") {
+      const dischargeItem = data.discharge;
+
+      if (dischargeItem && dischargeItem.thresholds) {
+        const thresholds = dischargeItem.thresholds;
+
+        const thresholdValues = [
+          thresholds.qm,
+          thresholds.q5,
+          thresholds.q50
+        ];
+
+        for (let t = 0; t < thresholdValues.length; t++) {
+          const v = thresholdValues[t];
+
+          if (
+            isValidNumber(v) &&
+            (maxValue === null || v > maxValue)
+          ) {
+            maxValue = v;
+          }
+        }
+      }
+    }
+  }
+
+  if (minValue === null || maxValue === null) {
+    return {
+      min: param.min,
+      max: null
+    };
+  }
+
+  let min = typeof param.min !== "undefined" ? param.min : minValue;
+  let max = maxValue;
+
+  if (typeof param.softMax !== "undefined" && max < param.softMax) {
+    max = param.softMax;
+  }
+
+  max = roundAxisMax(max);
+
+  if (param.temperatureZones) {
+    min = roundAxisMin(minValue);
+    max = roundAxisMax(maxValue);
+  }
+
+  return {
+    min: min,
+    max: max
+  };
+}
+
+function updateMinMaxFromSeries(item, callback) {
+  if (!seriesHasData(item)) {
+    return;
+  }
+
+  const rawData = item.data || [];
+
+  for (let i = 0; i < rawData.length; i++) {
+    const v = getValue(rawData[i]);
+
+    if (isValidNumber(v)) {
+      callback(v);
+    }
+  }
+}
+
+function roundAxisMax(value) {
+  if (!isValidNumber(value)) {
+    return value;
+  }
+
+  if (value <= 5) {
+    return Math.ceil(value);
+  }
+
+  if (value <= 20) {
+    return Math.ceil(value / 2) * 2;
+  }
+
+  if (value <= 50) {
+    return Math.ceil(value / 5) * 5;
+  }
+
+  if (value <= 100) {
+    return Math.ceil(value / 10) * 10;
+  }
+
+  return Math.ceil(value / 25) * 25;
+}
+
+function roundAxisMin(value) {
+  if (!isValidNumber(value)) {
+    return value;
+  }
+
+  if (value >= 0) {
+    return 0;
+  }
+
+  if (value >= -10) {
+    return Math.floor(value);
+  }
+
+  if (value >= -30) {
+    return Math.floor(value / 2) * 2;
+  }
+
+  return Math.floor(value / 5) * 5;
+  }
+function applyDischargeThresholds(axis, dischargeItem) {
+  // Viktig:
+  // nullstill alltid gamle flomlinjer
+  axis.plotLines = [];
+
+  // Nullstill eventuell softMax som kan ha kome frå førre stasjon
+  axis.softMax = undefined;
+
+  if (
+    !dischargeItem ||
+    !dischargeItem.thresholds
+  ) {
+    return;
+  }
+
+  const thresholds =
+    dischargeItem.thresholds;
+
+  const plotLines = [];
+
+
+  // -------------------------------------------------------------------------
+  // Middelflom
+  // -------------------------------------------------------------------------
+
+  if (isValidNumber(thresholds.qm)) {
+    plotLines.push({
+      id: "discharge_threshold_qm",
+
+      value: thresholds.qm,
+
+      color: "#eab308",
+
+      width: 1.5,
+
+      dashStyle: "Dash",
+
+      zIndex: 4,
+
+      label: {
+        text: "Middelflom (Qm)",
+
+        align: "right",
+
+        x: -4,
+
+        style: {
+          color: "#666666",
+          fontSize: "10px"
+        }
+      }
+    });
+  }
+
+
+  // -------------------------------------------------------------------------
+  // 5-årsflom
+  // -------------------------------------------------------------------------
+
+  if (isValidNumber(thresholds.q5)) {
+    plotLines.push({
+      id: "discharge_threshold_q5",
+
+      value: thresholds.q5,
+
+      color: "#f97316",
+
+      width: 1.5,
+
+      dashStyle: "Dash",
+
+      zIndex: 4,
+
+      label: {
+        text: "5-årsflom (Q5)",
+
+        align: "right",
+
+        x: -4,
+
+        style: {
+          color: "#666666",
+          fontSize: "10px"
+        }
+      }
+    });
+  }
+
+
+  // -------------------------------------------------------------------------
+  // 50-årsflom
+  // -------------------------------------------------------------------------
+
+  if (isValidNumber(thresholds.q50)) {
+    plotLines.push({
+      id: "discharge_threshold_q50",
+
+      value: thresholds.q50,
+
+      color: "#dc2626",
+
+      width: 1.5,
+
+      dashStyle: "Dash",
+
+      zIndex: 4,
+
+      label: {
+        text: "50-årsflom (Q50)",
+
+        align: "right",
+
+        x: -4,
+
+        style: {
+          color: "#666666",
+          fontSize: "10px"
+        }
+      }
+    });
+  }
+
+
+  // Legg inn dei nye plotLines.
+  // Dersom ingen verdiar fanst, blir dette [].
+  axis.plotLines = plotLines;
+
+
+  // -------------------------------------------------------------------------
+  // Finn høgaste terskel
+  // -------------------------------------------------------------------------
+
+  let highestThreshold = null;
+
+  if (isValidNumber(thresholds.qm)) {
+    highestThreshold =
+      thresholds.qm;
+  }
+
+  if (
+    isValidNumber(thresholds.q5) &&
+    (
+      highestThreshold === null ||
+      thresholds.q5 > highestThreshold
+    )
+  ) {
+    highestThreshold =
+      thresholds.q5;
+  }
+
+  if (
+    isValidNumber(thresholds.q50) &&
+    (
+      highestThreshold === null ||
+      thresholds.q50 > highestThreshold
+    )
+  ) {
+    highestThreshold =
+      thresholds.q50;
+  }
+
+
+  // Berre sett softMax dersom vi faktisk har ein terskel
+  if (highestThreshold !== null) {
+    axis.softMax =
+      roundAxisMax(
+        highestThreshold
+      );
+  }
+}
+function addDischargePercentiles(options) {
+  const dischargeItem = options.dischargeItem;
+  const axisId = options.axisId;
+  const series = options.series;
+  const station = options.station;
+
+  if (
+    !dischargeItem ||
+    !dischargeItem.percentiles ||
+    !dischargeItem.percentiles.length
+  ) {
+    return;
+  }
+
+  const percentiles = dischargeItem.percentiles;
+
+  let perc25Data = [];
+  let perc75Data = [];
+
+
+  // -------------------------------------------------------------------------
+  // Bygg percentile-seriane
+  // -------------------------------------------------------------------------
+
+  for (let i = 0; i < percentiles.length; i++) {
+    const p = percentiles[i];
+
+    const t =
+      isValidNumber(p.timestamp)
+        ? p.timestamp
+        : Date.parse(p.time || p.date);
+
+    if (!isValidNumber(t)) {
+      continue;
+    }
+
+    if (isValidNumber(p.perc25)) {
+      perc25Data.push([
+        t,
+        p.perc25
+      ]);
+    }
+
+    if (isValidNumber(p.perc75)) {
+      perc75Data.push([
+        t,
+        p.perc75
+      ]);
+    }
+  }
+
+
+  // Sørg for stigande tidsrekkefølge
+  perc25Data.sort(function(a, b) {
+    return a[0] - b[0];
+  });
+
+  perc75Data.sort(function(a, b) {
+    return a[0] - b[0];
+  });
+
+
+  // -------------------------------------------------------------------------
+  // Finn første gyldige tidspunkt i discharge-serien
+  // -------------------------------------------------------------------------
+
+  let dischargeStart = null;
+  let dischargeEnd = null;
+
+  if (dischargeItem.data && dischargeItem.data.length) {
+    for (let i = 0; i < dischargeItem.data.length; i++) {
+      const t = getTime(dischargeItem.data[i]);
+      const v = getValue(dischargeItem.data[i]);
+
+      if (
+        isValidNumber(t) &&
+        v !== null &&
+        typeof v !== "undefined"
+      ) {
+        if (dischargeStart === null) {
+          dischargeStart = t;
+        }
+
+        dischargeEnd = t;
+      }
+    }
+  }
+
+
+  // -------------------------------------------------------------------------
+  // Klipp percentile-seriane til starten av discharge
+  // -------------------------------------------------------------------------
+
+  if (
+    isValidNumber(dischargeStart) &&
+    isValidNumber(dischargeEnd)
+  ) {
+    perc25Data = trimPercentileToDischargeRange(
+      perc25Data,
+      dischargeStart,
+      dischargeEnd
+    );
+
+    perc75Data = trimPercentileToDischargeRange(
+      perc75Data,
+      dischargeStart,
+      dischargeEnd
+    );
+  }
+
+
+  // -------------------------------------------------------------------------
+  // P25 - nedre grense for normalområdet
+  // -------------------------------------------------------------------------
+
+  if (perc25Data.length) {
+    series.push({
+      id: "series_discharge_p25_" + axisId,
+
+      name: makeSeriesName(
+        station,
+        "Normalområde nedre"
+      ),
+
+      type: "line",
+      yAxis: axisId,
+      data: perc25Data,
+
+      color: "#16a34a",
+
+      zones: [],
+      zoneAxis: "y",
+
+      step: "left",
+
+      lineWidth: 1,
+      dashStyle: "ShortDash",
+
+      marker: {
+        enabled: false
+      },
+
+      showInLegend: false,
+      enableMouseTracking: false,
+
+      zIndex: 1
+    });
+  }
+
+
+  // -------------------------------------------------------------------------
+  // P75 - øvre grense for normalområdet
+  // -------------------------------------------------------------------------
+
+  if (perc75Data.length) {
+    series.push({
+      id: "series_discharge_p75_" + axisId,
+
+      name: makeSeriesName(
+        station,
+        "Normalområde øvre"
+      ),
+
+      type: "line",
+      yAxis: axisId,
+      data: perc75Data,
+
+      color: "#16a34a",
+
+      // Viktig reset
+      zones: [],
+      zoneAxis: "y",
+
+      step: "left",
+
+      lineWidth: 1,
+      dashStyle: "ShortDash",
+
+      marker: {
+        enabled: false
+      },
+
+      showInLegend: false,
+      enableMouseTracking: false,
+
+      zIndex: 1
+    });
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// Klipp ein percentile-serie slik at han startar samtidig med discharge
+// ---------------------------------------------------------------------------
+
+function trimPercentileToDischargeRange(data, startTime, endTime) {
+  if (!data || !data.length) {
+    return [];
+  }
+
+  const result = [];
+
+  let valueAtStart = null;
+  let valueAtEnd = null;
+
+  // Finn percentile-verdien som gjeld ved start
+  for (let i = 0; i < data.length; i++) {
+    if (data[i][0] <= startTime) {
+      valueAtStart = data[i][1];
+    } else {
+      break;
+    }
+  }
+
+  if (valueAtStart !== null) {
+    result.push([
+      startTime,
+      valueAtStart
+    ]);
+  }
+
+  // Ta med percentile-punkt inne i discharge-perioden
+  for (let i = 0; i < data.length; i++) {
+    const t = data[i][0];
+
+    if (t > startTime && t < endTime) {
+      result.push(data[i]);
+    }
+  }
+
+  // Finn percentile-verdien som gjeld ved slutten
+  for (let i = 0; i < data.length; i++) {
+    if (data[i][0] <= endTime) {
+      valueAtEnd = data[i][1];
+    } else {
+      break;
+    }
+  }
+
+  // Avslutt akkurat samtidig som discharge
+  if (valueAtEnd !== null) {
+    result.push([
+      endTime,
+      valueAtEnd
+    ]);
+  }
+
+  return result;
+}
+function enableStationHoverHighlight(chart, stationApis, parameterKey) {
+    disableStationHoverHighlight(chart);
+
+    const param = findParamByKey(parameterKey);
+    if (!param) {
+        return;
+    }
+
+    const visibleStations = stationApis
+        .slice(0, MAX_STATIONS_IN_ALL_MODE)
+        .filter(function(api) {
+            return paramHasData(param, api.series || {});
+        });
+
+    // Slå opp aksane ved modusbyte. Les oppdatert top/height ved kvar hending.
+    const rows = visibleStations.map(function(api, i) {
+        return {
+            station: api.station,
+            axis: chart.get(parameterKey + "_station_" + i),
+            directionAxis: parameterKey === "wind"
+                ? chart.get("wind_direction_station_" + i)
+                : null
+        };
+    });
+
+    let lastSourceId = null;
+
+    function onMouseMove(event) {
+        const pos = chart.pointer.normalize(event);
+        if (
+            pos.chartX < chart.plotLeft ||
+            pos.chartX > chart.plotLeft + chart.plotWidth ||
+            pos.chartY < chart.plotTop ||
+            pos.chartY > chart.plotTop + chart.plotHeight
+        ) {
+            return;
+        }
+
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            if (!row.axis || !row.station) {
+                continue;
+            }
+            const bottomAxis = row.directionAxis || row.axis;
+            const bottom = bottomAxis.top + bottomAxis.height;
+            if (pos.chartY < row.axis.top || pos.chartY > bottom) {
+                continue;
+            }
+
+            const rawId = row.station.source_id;
+            if (rawId === null || typeof rawId === "undefined") {
+                return;
+            }
+            const sourceId = ("" + rawId).trim();
+            if (!sourceId || sourceId === lastSourceId) {
+                return;
+            }
+
+            lastSourceId = sourceId;
+            chart.weatherActiveStation = row.station;
+            notifyStationSelected(row.station);
+            return;
+        }
+    }
+
+    function onMouseLeave() {
+        // Behald highlight på sist markerte stasjon.
+    }
+
+    chart.container.addEventListener("mousemove", onMouseMove);
+    chart.container.addEventListener("mouseleave", onMouseLeave);
+    chart.weatherHoverHandlers = { move: onMouseMove, leave: onMouseLeave };
+}
+
+function enableSingleStationHoverHighlight(chart) {
+    disableStationHoverHighlight(chart);
+    let lastSourceId = null;
+
+    function onMouseMove(event) {
+        const pos = chart.pointer.normalize(event);
+        const insidePlot =
+            pos.chartX >= chart.plotLeft &&
+            pos.chartX <= chart.plotLeft + chart.plotWidth &&
+            pos.chartY >= chart.plotTop &&
+            pos.chartY <= chart.plotTop + chart.plotHeight;
+
+        // Les frå chart; ikkje hald fast på eit station-objekt frå førre kjelde.
+        const station = chart.weatherActiveStation;
+        if (!insidePlot || !station || station.source_id === null ||
+            typeof station.source_id === "undefined") {
+            return;
+        }
+        const sourceId = ("" + station.source_id).trim();
+        if (sourceId && sourceId !== lastSourceId) {
+            lastSourceId = sourceId;
+            notifyStationSelected(station);
+        }
+    }
+
+    function onMouseLeave() {
+        // Same oppførsel som i parametervisninga: behald siste markering.
+        lastSourceId = null;
+    }
+
+    chart.container.addEventListener("mousemove", onMouseMove);
+    chart.container.addEventListener("mouseleave", onMouseLeave);
+    chart.weatherHoverHandlers = { move: onMouseMove, leave: onMouseLeave };
+}
+
+function disableStationHoverHighlight(chart) {
+
+    if (!chart.weatherHoverHandlers) {
+        return;
+    }
+
+    chart.container.removeEventListener(
+        "mousemove",
+        chart.weatherHoverHandlers.move
+    );
+
+    chart.container.removeEventListener(
+        "mouseleave",
+        chart.weatherHoverHandlers.leave
+    );
+
+    chart.weatherHoverHandlers = null;
+}
+
+// ---------------------------------------------------------------------------
+// VINDROSER
+// ---------------------------------------------------------------------------
+
+function showWindRoseOverlay(chart, stationApis) {
+  closeWindRoseOverlay(chart, false);
+
+  const stationsWithWind = [];
+  // Også målingar under 3 m/s utan vindretning skal telje i midtsirkelen.
+  const stationsWithWind = stationApis.filter(function(api) {
+    return seriesHasData((api.series || {}).wind_speed);
+  }).slice(0, MAX_STATIONS_IN_ALL_MODE);
+
+  for (let i = 0; i < stationApis.length; i++) {
+    const api = stationApis[i];
+    const data = api.series || {};
+
+    if (
+      seriesHasData(data.wind_speed) &&
+      seriesHasData(data.wind_from_direction)
+    ) {
+      stationsWithWind.push(api);
+    }
+  }
+
+  if (!stationsWithWind.length) {
+    alert(
+      "Ingen stasjonar har både vindhastigheit og vindretning."
+    );
+    alert("Ingen stasjonar har vindhastigheit.");
+    return;
+  }
+
+  /*
+   * Legg overlayet inni same element som Highcharts nyttar.
+   * Då treng vi ikkje endre hovuddiagrammet.
+   */
+  const host = chart.renderTo;
+
+  if (!host) {
+    return;
+  }
+
+  const oldPosition = host.style.position;
+
+  if (
+    !oldPosition ||
+    oldPosition === "static"
+  ) {
+  if (!host.style.position || host.style.position === "static") {
+    host.style.position = "relative";
+  }
+
+  const overlay = document.createElement("div");
+
+  overlay.className = "weather-windrose-overlay";
+  overlay.style.cssText = "position:absolute;inset:0;z-index:1000;background:#fff;overflow:auto;padding:12px;box-sizing:border-box;";
+
+  overlay.style.position = "absolute";
+  overlay.style.left = "0";
+  overlay.style.top = "0";
+  overlay.style.right = "0";
+  overlay.style.bottom = "0";
+  overlay.style.zIndex = "1000";
+  overlay.style.background = "#ffffff";
+  overlay.style.overflow = "auto";
+  overlay.style.padding = "12px";
+  overlay.style.boxSizing = "border-box";
+
+  const toolbar = document.createElement("div");
+
+  toolbar.style.display = "flex";
+  toolbar.style.alignItems = "center";
+  toolbar.style.justifyContent = "space-between";
+  toolbar.style.marginBottom = "12px";
+  toolbar.style.gap = "12px";
+
+  toolbar.style.cssText = "display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:8px;";
+  const heading = document.createElement("div");
+
+  heading.textContent = "Vindroser";
+  heading.style.fontSize = "16px";
+  heading.style.fontWeight = "600";
+  heading.style.color = "#334155";
+
+  const closeButton = document.createElement("button");
+
+  closeButton.type = "button";
+  closeButton.textContent = "Lukk";
+  closeButton.style.padding = "6px 14px";
+  closeButton.style.border = "1px solid #64748b";
+  closeButton.style.background = "#ffffff";
+  closeButton.style.color = "#1e293b";
+  closeButton.style.cursor = "pointer";
+  closeButton.style.fontSize = "12px";
+
+  closeButton.onclick = function() {
+    closeWindRoseOverlay(chart);
+  };
+
+  heading.style.cssText = "font-size:16px;font-weight:600;color:#334155;";
+  toolbar.appendChild(heading);
+  toolbar.appendChild(closeButton);
+
+  const controls = document.createElement("div");
+  controls.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;";
+  const periods = [
+    { hours: null, label: "Heile perioden" },
+    { hours: 24, label: "Siste 24t" },
+    { hours: 6, label: "Siste 6t" }
+  ];
+  const periodButtons = [];
+  periods.forEach(function(period) {
+    const button = makeWindRoseButton(period.label);
+    button.onclick = function() { renderPeriod(period.hours); };
+    periodButtons.push(button);
+    controls.appendChild(button);
+  });
+  const closeButton = makeWindRoseButton("Lukk");
+  closeButton.onclick = function() { closeWindRoseOverlay(chart); };
+  controls.appendChild(closeButton);
+  toolbar.appendChild(controls);
+  overlay.appendChild(toolbar);
+
+  const grid = document.createElement("div");
+  const periodText = document.createElement("div");
+  periodText.style.cssText = "font-size:11px;color:#475569;margin-bottom:6px;";
+  overlay.appendChild(periodText);
+  const explanation = document.createElement("div");
+  explanation.textContent = "Grå sirkel: målingar under 3 m/s. Sirkelradius og sektorlengd brukar same %-skala. Sektorane startar ved sirkelkanten. Beaufort 2 er avgrensa til 3–<3,4 m/s. Tidsvala brukar berre innlasta data.";
+  explanation.style.cssText = "font-size:11px;color:#475569;margin-bottom:12px;max-width:1000px;";
+  overlay.appendChild(explanation);
+
+  grid.style.display = "grid";
+  grid.style.gridTemplateColumns =
+    "repeat(auto-fit, minmax(320px, 1fr))";
+  grid.style.gap = "16px";
+  grid.style.alignItems = "start";
+
+  const grid = document.createElement("div");
+  grid.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:16px;align-items:start;";
+  overlay.appendChild(grid);
+  host.appendChild(overlay);
+
+  chart.weatherWindRoseOverlay = overlay;
+  chart.weatherWindRoseCharts = [];
+
+  /*
+   * Same avgrensing som i parametervisninga.
+   * Fjern slice dersom du vil vise absolutt alle.
+   */
+  const limitedStations =
+    stationsWithWind.slice(
+      0,
+      MAX_STATIONS_IN_ALL_MODE
+    );
+  // Eitt felles sluttidspunkt for alle stasjonar og alle tidsval.
+  const endTime = getWindRoseEndTime(stationApis);
+  function renderPeriod(hours) {
+    destroyWindRoseCharts(chart);
+    while (grid.firstChild) {
+      grid.removeChild(grid.firstChild);
+    }
+    periodButtons.forEach(function(button, index) {
+      const selected = periods[index].hours === hours;
+      button.setAttribute("aria-pressed", selected ? "true" : "false");
+      button.style.background = selected ? "#334155" : "#ffffff";
+      button.style.color = selected ? "#ffffff" : "#1e293b";
+      button.style.fontWeight = selected ? "600" : "normal";
+    });
+
+  for (
+    let i = 0;
+    i < limitedStations.length;
+    i++
+  ) {
+    const api = limitedStations[i];
+    const range = {
+      from: hours === null ? -Infinity : endTime - hours * 3600000,
+      to: endTime
+    };
+    periodText.textContent = hours === null
+      ? "Heile den innlasta perioden, til " + formatWindRoseTime(endTime)
+      : formatWindRoseTime(range.from) + " – " + formatWindRoseTime(range.to);
+
+    const chartContainer =
+      document.createElement("div");
+
+    chartContainer.style.width = "100%";
+    chartContainer.style.height = "390px";
+    chartContainer.style.minWidth = "0";
+    chartContainer.style.border =
+      "1px solid #e2e8f0";
+    chartContainer.style.background =
+      "#ffffff";
+    chartContainer.style.boxSizing =
+      "border-box";
+
+    grid.appendChild(chartContainer);
+
+    // Highlight stasjonen i kartet ved mouseover
+    chartContainer.addEventListener(
+    "mouseenter",
+    function() {
+    const roseData = stationsWithWind.map(function(api) {
+      return calculateWindRoseData(api, range);
+    });
+    const radialMax = getWindRoseRadialMax(roseData);
+    // Legg alle kort i gridet før Highcharts måler breidda på kvart kort.
+    const chartContainers = stationsWithWind.map(function(api) {
+      const chartContainer = document.createElement("div");
+      chartContainer.style.cssText = "width:100%;height:500px;min-width:0;border:1px solid #e2e8f0;background:#fff;box-sizing:border-box;";
+      chartContainer.addEventListener("mouseenter", function() {
+        notifyStationSelected(api.station);
+    }
+    );
+      });
+      grid.appendChild(chartContainer);
+      return chartContainer;
+    });
+    stationsWithWind.forEach(function(api, index) {
+      const ChartClass = chart["constructor"];
+      chart.weatherWindRoseCharts.push(new ChartClass(
+        chartContainers[index],
+        buildWindRoseOptions(api, roseData[index], radialMax)
+      ));
+    });
+  }
+  renderPeriod(null);
+}
+
+function makeWindRoseButton(label) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.style.cssText = "padding:6px 12px;border:1px solid #64748b;border-radius:3px;background:#fff;color:#1e293b;cursor:pointer;font-size:12px;";
+  return button;
+}
+
+    const roseOptions =
+      buildWindRoseOptions(api);
+function formatWindRoseTime(timestamp) {
+  return new Date(timestamp).toLocaleString("nb-NO", {
+    timeZone: "Europe/Oslo", day: "2-digit", month: "2-digit",
+    year: "numeric", hour: "2-digit", minute: "2-digit"
+  });
+}
+
+    const ChartClass = chart["constructor"];
+
+    const roseChart = new ChartClass(
+        chartContainer,
+        roseOptions
+    );
+
+    chart.weatherWindRoseCharts.push(
+      roseChart
+    );
+function getWindRoseEndTime(apis) {
+  const now = Date.now();
+  const rawTo = stationApisRaw && stationApisRaw.to;
+  const requestedEnd = typeof rawTo === "number" ? rawTo : Date.parse(rawTo);
+  if (isValidNumber(requestedEnd)) {
+    return Math.min(requestedEnd, now);
+  }
+  // Array-input kan mangle to. Bruk då nyaste innlasta vindmåling.
+  let latestTime = null;
+  apis.forEach(function(api) {
+    const item = (api.series || {}).wind_speed;
+    ((item && item.data) || []).forEach(function(point) {
+      const time = getTime(point);
+      const speed = getValue(point);
+      if (isValidNumber(time) && time <= now && isValidNumber(speed) && speed >= 0 &&
+          (latestTime === null || time > latestTime)) {
+        latestTime = time;
+      }
+    });
+  });
+  return latestTime === null ? now : latestTime;
+}
+
+function closeWindRoseOverlay(chart, restoreHighlight) {
+  if (
+    chart.weatherWindRoseCharts &&
+    chart.weatherWindRoseCharts.length
+  ) {
+    for (
+      let i = 0;
+      i < chart.weatherWindRoseCharts.length;
+      i++
+    ) {
+      const roseChart =
+        chart.weatherWindRoseCharts[i];
+
+      if (
+        roseChart &&
+        typeof roseChart.destroy === "function"
+      ) {
+        roseChart.destroy();
+      }
+function destroyWindRoseCharts(chart) {
+  (chart.weatherWindRoseCharts || []).forEach(function(rose) {
+    if (rose && typeof rose.destroy === "function") {
+      rose.destroy();
+    }
+  }
+
+  });
+  chart.weatherWindRoseCharts = [];
+}
+
+  if (
+    chart.weatherWindRoseOverlay &&
+    chart.weatherWindRoseOverlay.parentNode
+  ) {
+    chart.weatherWindRoseOverlay.parentNode.removeChild(
+      chart.weatherWindRoseOverlay
+    );
+function closeWindRoseOverlay(chart, restoreHighlight) {
+  destroyWindRoseCharts(chart);
+  if (chart.weatherWindRoseOverlay && chart.weatherWindRoseOverlay.parentNode) {
+    chart.weatherWindRoseOverlay.parentNode.removeChild(chart.weatherWindRoseOverlay);
+  }
+
+  chart.weatherWindRoseOverlay = null;
+  if (restoreHighlight !== false && chart.weatherActiveStation) {
+    notifyStationSelected(chart.weatherActiveStation);
+  }
+}
+
+    if (restoreHighlight !== false && chart.weatherActiveStation) {
+        notifyStationSelected(chart.weatherActiveStation);
+function getWindRoseRadialMax(roses) {
+  let maximum = 0;
+  roses.forEach(function(rose) {
+    maximum = Math.max(maximum, rose.calmPercent || 0);
+    for (let direction = 0; direction < rose.directions.length; direction++) {
+      let total = 0;
+      rose.speedClasses.forEach(function(speedClass) { total += speedClass.values[direction]; });
+      maximum = Math.max(maximum, (rose.calmPercent || 0) + total);
+    }
+  });
+  // Retningssektorane startar ved sirkelkanten. Ta med heile radiallengda.
+  return Math.min(100, Math.max(10, Math.ceil(maximum / 10) * 10));
+}
+
+function buildWindRoseOptions(api) {
+function buildWindRoseOptions(api, windRoseData, radialMax) {
+  const station = api.station || {};
+  const windRoseData =
+    calculateWindRoseData(api);
+
+  const series = [];
+
+  for (
+    let i = 0;
+    i < windRoseData.speedClasses.length;
+    i++
+  ) {
+    const speedClass =
+      windRoseData.speedClasses[i];
+
+    series.push({
+      name: speedClass.label,
+      data: speedClass.values,
+      color: speedClass.color,
+      borderWidth: 0.5,
+      borderColor: "#ffffff"
+    });
+  let subtitleText = "Ingen gyldige vindmålingar i perioden";
+  if (windRoseData.validCount > 0) {
+    subtitleText = windRoseData.validCount + " målingar · <3 m/s: " +
+      windRoseData.calmPercent.toFixed(1) + " %";
+    if (windRoseData.missingDirectionCount > 0) {
+      subtitleText += " · " + windRoseData.missingDirectionCount + " utan vindretning (≥3 m/s)";
+    }
+  }
+
+  let subtitleText =
+    windRoseData.validCount +
+    " observasjonar";
+
+  if (windRoseData.calmCount > 0) {
+    subtitleText +=
+      " · " +
+      windRoseData.calmCount +
+      " vindstille";
+  }
+
+  return {
+    chart: {
+      polar: true,
+      type: "column",
+      animation: false,
+      backgroundColor: "#ffffff",
+      spacingTop: 10,
+      spacingRight: 10,
+      spacingBottom: 10,
+      spacingLeft: 10
+      polar: true, type: "column", animation: false,
+      backgroundColor: "#ffffff", spacingTop: 12,
+      spacingRight: 14, spacingBottom: 12, spacingLeft: 14,
+      events: {
+        render: function() { renderWindRoseCalmMarker(this, windRoseData, radialMax); },
+        destroy: function() { destroyWindRoseCalmMarker(this); }
+      }
+    },
+
+    title: {
+      text:
+        station.name ||
+        station.source_id ||
+        "Vêrstasjon",
+      style: {
+        fontSize: "13px",
+        fontWeight: "600"
+      }
+      text: station.name || station.source_id || "Vêrstasjon",
+      style: { fontSize: "13px", fontWeight: "600" }
+    },
+
+    subtitle: {
+      text: subtitleText,
+      style: {
+        fontSize: "10px",
+        color: "#64748b"
+      }
+    },
+
+    pane: {
+      size: "78%"
+    },
+
+    subtitle: { text: subtitleText, style: { fontSize: "10px", color: "#64748b" } },
+    // Eksplisitt geometri, brukt også ved teikning av midtsirkelen.
+    pane: { size: "76%", center: ["50%", "50%"] },
+    xAxis: {
+      categories: windRoseData.directions,
+      tickmarkPlacement: "on",
+      lineWidth: 0,
+      gridLineWidth: 1,
+      labels: {
+        style: {
+          fontSize: "10px"
+        }
+      }
+      categories: windRoseData.directions, tickmarkPlacement: "on",
+      lineWidth: 0, gridLineWidth: 1,
+      labels: { style: { fontSize: "10px" } }
+    },
+
+    yAxis: {
+      min: 0,
+      endOnTick: false,
+      showLastLabel: true,
+      gridLineInterpolation: "polygon",
+
+      title: {
+        text: null
+      },
+
+      min: 0, max: radialMax, tickInterval: radialMax <= 20 ? 5 : 10,
+      reversedStacks: false,
+      endOnTick: false, showLastLabel: true, gridLineInterpolation: "circle",
+      title: { text: null },
+      labels: {
+        formatter: function() {
+          return this.value + " %";
+        },
+        style: {
+          fontSize: "9px"
+        }
+        formatter: function() { return this.value + " %"; },
+        style: { fontSize: "9px" }
+      }
+    },
+
+    tooltip: {
+      shared: true,
+      valueDecimals: 1,
+      valueSuffix: " %",
+
+      headerFormat:
+        '<span style="font-size:11px">' +
+        "{point.key}" +
+        "</span><br/>",
+
+      pointFormat:
+        '<span style="color:{series.color}">' +
+        "●</span> " +
+        "{series.name}: " +
+        "<b>{point.y:.1f} %</b><br/>"
+      shared: true, valueDecimals: 1, valueSuffix: " %",
+      headerFormat: '<span style="font-size:11px">{point.key}</span><br/>',
+      pointFormat: '<span style="color:{series.color}">●</span> {series.name}: <b>{point.y:.1f} %</b><br/>'
+    },
+
+    plotOptions: {
+      series: {
+        stacking: "normal",
+        pointPlacement: "on",
+        groupPadding: 0,
+        pointPadding: 0
+      },
+
+      column: {
+        stacking: "normal",
+        pointPlacement: "on",
+        groupPadding: 0,
+        pointPadding: 0
+      }
+      series: { animation: false, stacking: "normal", pointPlacement: "on", groupPadding: 0, pointPadding: 0 },
+      column: { stacking: "normal", pointPlacement: "on", groupPadding: 0, pointPadding: 0 }
+    },
+
+    legend: {
+      enabled: true,
+      align: "center",
+      verticalAlign: "bottom",
+      layout: "horizontal",
+      itemStyle: {
+        fontSize: "9px",
+        fontWeight: "normal"
+      }
+      enabled: true, align: "center", verticalAlign: "bottom", layout: "horizontal",
+      maxHeight: 110, itemStyle: { fontSize: "9px", fontWeight: "normal" }
+    },
+
+    credits: {
+      enabled: false
+    },
+
+    exporting: {
+      enabled: false
+    },
+
+    series: series
+    credits: { enabled: false }, exporting: { enabled: false },
+    series: [{
+      // Transparent botn i kvar sektor flyttar Beaufort-søylene ut til sirkelkanten.
+      name: "Under 3 m/s (radial start)",
+      data: windRoseData.directions.map(function() { return windRoseData.calmPercent || 0; }),
+      color: "rgba(0,0,0,0)", borderWidth: 0,
+      showInLegend: false, enableMouseTracking: false, includeInDataExport: false,
+      tooltip: { pointFormatter: function() { return ""; } }
+    }].concat(windRoseData.speedClasses.map(function(speedClass) {
+      return {
+        name: speedClass.label, data: speedClass.values, color: speedClass.color,
+        borderWidth: 0.5, borderColor: "#ffffff"
+      };
+    }))
+  };
+}
+
+function calculateWindRoseData(api) {
+  const data = api.series || {};
+function renderWindRoseCalmMarker(chart, rose, radialMax) {
+  if (!chart.renderer || chart.plotWidth <= 0 || chart.plotHeight <= 0) {
+    return;
+  }
+  if (!chart.weatherCalmMarker) {
+    const circleGroup = chart.renderer.g("windrose-low-wind").attr({ zIndex: 1 }).add();
+    const textGroup = chart.renderer.g("windrose-low-wind-label").attr({ zIndex: 7 }).add();
+    chart.weatherCalmMarker = {
+      circleGroup: circleGroup, textGroup: textGroup,
+      circle: chart.renderer.circle(0, 0, 0).attr({
+        fill: "rgba(100,116,139,0.16)", stroke: "#64748b", "stroke-width": 1
+      }).add(circleGroup),
+      label: chart.renderer.text("", 0, 0).attr({ "text-anchor": "middle" }).css({
+        fontSize: "11px", fontWeight: "600", color: "#334155", textOutline: "3px white"
+      }).add(textGroup)
+    };
+    circleGroup.css({ pointerEvents: "none" });
+    textGroup.css({ pointerEvents: "none" });
+  }
+  const x = chart.plotLeft + chart.plotWidth / 2;
+  const y = chart.plotTop + chart.plotHeight / 2;
+  const outerRadius = Math.min(chart.plotWidth, chart.plotHeight) * 0.76 / 2;
+  // Lineær radius i prosent, ikkje kvadratrota av prosentdelen (areal).
+  const radius = rose.validCount > 0 ? outerRadius * rose.calmPercent / radialMax : 0;
+  chart.weatherCalmMarker.circle.attr({ cx: x, cy: y, r: radius });
+  chart.weatherCalmMarker.label.attr({
+    x: x, y: y + 4,
+    text: rose.validCount > 0 ? rose.calmPercent.toFixed(1) + " %" : "Ingen data"
+  });
+}
+
+  const speedItem =
+    data.wind_speed;
+function destroyWindRoseCalmMarker(chart) {
+  if (chart.weatherCalmMarker) {
+    chart.weatherCalmMarker.circleGroup.destroy();
+    chart.weatherCalmMarker.textGroup.destroy();
+    chart.weatherCalmMarker = null;
+  }
+}
+
+  const directionItem =
+    data.wind_from_direction;
+
+  const directions = [
+    "N",
+    "NNE",
+    "NE",
+    "ENE",
+    "E",
+    "ESE",
+    "SE",
+    "SSE",
+    "S",
+    "SSW",
+    "SW",
+    "WSW",
+    "W",
+    "WNW",
+    "NW",
+    "NNW"
+  ];
+
+  const speedClasses = [
+    {
+      label: "0–2 m/s",
+      min: 0,
+      max: 2,
+      color: "#dbeafe",
+      values: makeZeroArray(16)
+    },
+    {
+      label: "2–4 m/s",
+      min: 2,
+      max: 4,
+      color: "#93c5fd",
+      values: makeZeroArray(16)
+    },
+    {
+      label: "4–6 m/s",
+      min: 4,
+      max: 6,
+      color: "#38bdf8",
+      values: makeZeroArray(16)
+    },
+    {
+      label: "6–8 m/s",
+      min: 6,
+      max: 8,
+      color: "#22c55e",
+      values: makeZeroArray(16)
+    },
+    {
+      label: "8–10 m/s",
+      min: 8,
+      max: 10,
+      color: "#f59e0b",
+      values: makeZeroArray(16)
+    },
+    {
+      label: "10–15 m/s",
+      min: 10,
+      max: 15,
+      color: "#f97316",
+      values: makeZeroArray(16)
+    },
+    {
+      label: "≥15 m/s",
+      min: 15,
+      max: Infinity,
+      color: "#dc2626",
+      values: makeZeroArray(16)
+    }
+  ];
+
+function calculateWindRoseData(api, range) {
+  const data = api.series || {};
+  const speedData = (data.wind_speed && data.wind_speed.data) || [];
+  const directionData = (data.wind_from_direction && data.wind_from_direction.data) || [];
+  range = range || { from: -Infinity, to: Date.now() };
+  const directions = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+    "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+  const speedClasses = makeWindRoseSpeedClasses();
+  const speedByTimestamp = {};
+  const speedData =
+    speedItem && speedItem.data
+      ? speedItem.data
+      : [];
+
+  for (
+    let i = 0;
+    i < speedData.length;
+    i++
+  ) {
+    const point = speedData[i];
+    const timestamp = getTime(point);
+    const value = getValue(point);
+
+    if (
+      isValidNumber(timestamp) &&
+      isValidNumber(value)
+    ) {
+        speedByTimestamp[timestamp] = value;
+  const directionByTimestamp = {};
+  speedData.forEach(function(point) {
+    const time = getTime(point);
+    const speed = getValue(point);
+    if (isValidNumber(time) && time > range.from && time <= range.to && isValidNumber(speed) && speed >= 0) {
+      speedByTimestamp[time] = speed;
+    }
+  });
+  directionData.forEach(function(point) {
+    const time = getTime(point);
+    const direction = getValue(point);
+    if (isValidNumber(time) && isValidNumber(direction) && direction >= 0 && direction <= 360) {
+      directionByTimestamp[time] = direction;
+  }
+    }
+  });
+
+  const directionData =
+    directionItem &&
+    directionItem.data
+      ? directionItem.data
+      : [];
+
+  let validCount = 0;
+  let calmCount = 0;
+
+  for (
+    let i = 0;
+    i < directionData.length;
+    i++
+  ) {
+    const directionPoint =
+      directionData[i];
+
+    const timestamp =
+      getTime(directionPoint);
+
+    const direction =
+      getValue(directionPoint);
+
+    if (
+      !isValidNumber(timestamp) ||
+      !isValidNumber(direction)
+    ) {
+      continue;
+    }
+
+    const speed = speedByTimestamp[timestamp];
+
+    if (!isValidNumber(speed)) {
+      continue;
+    }
+
+    /*
+     * Vindstille har i praksis inga meiningsfull retning.
+     * Vi tel dei separat i staden for å leggje dei i ein sektor.
+     */
+    if (speed < 0.5) {
+  let directionalCount = 0;
+  let missingDirectionCount = 0;
+  Object.keys(speedByTimestamp).forEach(function(time) {
+    const speed = speedByTimestamp[time];
+    validCount++;
+    if (speed < 3) {
+      calmCount++;
+      continue;
+      return;
+    }
+
+    const normalizedDirection =
+      ((direction % 360) + 360) % 360;
+
+    const directionIndex =
+      Math.floor(
+        (
+          normalizedDirection +
+          11.25
+        ) / 22.5
+      ) % 16;
+
+    const speedClassIndex =
+      findWindSpeedClass(
+        speed,
+        speedClasses
+      );
+
+    if (speedClassIndex === -1) {
+      continue;
+    const direction = directionByTimestamp[time];
+    if (!isValidNumber(direction)) {
+      missingDirectionCount++;
+      return;
+    }
+
+    speedClasses[
+      speedClassIndex
+    ].values[
+      directionIndex
+    ]++;
+
+    validCount++;
+  }
+
+  /*
+   * Gjer tal om til prosent av alle gyldige,
+   * ikkje-vindstille observasjonar.
+   */
+    const directionIndex = Math.floor(((direction % 360) + 11.25) / 22.5) % 16;
+    const classIndex = findWindSpeedClass(speed, speedClasses);
+    speedClasses[classIndex].values[directionIndex]++;
+    directionalCount++;
+  });
+  // Nemnaren er alle gyldige vindfartsmålingar, også dei under 3 m/s og dei utan retning.
+  if (validCount > 0) {
+    for (
+      let c = 0;
+      c < speedClasses.length;
+      c++
+    ) {
+      for (
+        let d = 0;
+        d < speedClasses[c].values.length;
+        d++
+      ) {
+        speedClasses[c].values[d] =
+          Math.round(
+            (
+              speedClasses[c].values[d] /
+              validCount *
+              100
+            ) *
+            10
+          ) / 10;
+      }
+    }
+    speedClasses.forEach(function(speedClass) {
+      speedClass.values = speedClass.values.map(function(count) { return count / validCount * 100; });
+    });
+  }
+
+  return {
+    directions: directions,
+    speedClasses: speedClasses,
+    validCount: validCount,
+    calmCount: calmCount
+    directions: directions, speedClasses: speedClasses,
+    validCount: validCount, calmCount: calmCount, directionalCount: directionalCount,
+    missingDirectionCount: missingDirectionCount,
+    calmPercent: validCount > 0 ? calmCount / validCount * 100 : null
+  };
+}
+
+function makeWindRoseSpeedClasses() {
+  // Beaufort, kontinuerlege intervall med nedre grense inkludert.
+  // Bf 0, Bf 1 og delen av Bf 2 under 3 m/s er samla i midtsirkelen.
+  const levels = [
+    [2, 3, 3.4, "Svak vind", "#cbd5e1"],
+    [3, 3.4, 5.5, "Lett bris", "#93c5fd"],
+    [4, 5.5, 8, "Laber bris", "#38bdf8"],
+    [5, 8, 10.8, "Frisk bris", "#22c55e"],
+    [6, 10.8, 13.9, "Liten kuling", "#a3e635"],
+    [7, 13.9, 17.2, "Stiv kuling", "#facc15"],
+    [8, 17.2, 20.8, "Sterk kuling", "#fb923c"],
+    [9, 20.8, 24.5, "Liten storm", "#f97316"],
+    [10, 24.5, 28.5, "Full storm", "#ef4444"],
+    [11, 28.5, 32.7, "Sterk storm", "#dc2626"],
+    [12, 32.7, Infinity, "Orkan", "#9333ea"]
+  ];
+  return levels.map(function(level) {
+    const lower = ("" + level[1]).replace(".", ",");
+    const upper = ("" + level[2]).replace(".", ",");
+    return {
+      beaufort: level[0], min: level[1], max: level[2], color: level[4],
+      label: "Bf " + level[0] + " " + level[3] + " (" + lower +
+        (level[2] === Infinity ? "+" : "–<" + upper) + " m/s)",
+      values: makeZeroArray(16)
+    };
+  });
+}
+
+function makeZeroArray(length) {
+  const result = [];
+
+  for (let i = 0; i < length; i++) {
+  for (let i = 0; i < length; i++) { result.push(0); }
+    result.push(0);
+  }
+
+  return result;
+}
+
+function findWindSpeedClass(
+  speed,
+  speedClasses
+) {
+  for (
+    let i = 0;
+    i < speedClasses.length;
+    i++
+  ) {
+    const speedClass =
+      speedClasses[i];
+
+    if (
+      speed >= speedClass.min &&
+      speed < speedClass.max
+    ) {
+      return i;
+    }
+function findWindSpeedClass(speed, speedClasses) {
+  for (let i = 0; i < speedClasses.length; i++) {
+    if (speed >= speedClasses[i].min && speed < speedClasses[i].max) { return i; }
+  }
+
+  return -1;
+}
+
+})();

@@ -1,6 +1,6 @@
 # API-proxy for Respons
 
-Denne tenesta samlar vêr-, snø- og hydrologidata til kartportalen **Respons**, som blir brukt til skredberedskap. Ho normaliserer data frå Frost, NVE HydAPI, Snower, Tilsig, Wyssen og Skred AS til felles stasjonar og parameterar.
+Denne tenesta samlar vêr-, snø- og hydrologidata til kartportalen **Respons**, som blir brukt til skredberedskap. Ho normaliserer data frå Frost, NVE HydAPI, Snower, Tilsig, Wyssen, Skred AS og Netatmo til felles stasjonar og parameterar.
 
 Tenesta har to dataflytar:
 
@@ -44,6 +44,10 @@ SNOWER_DOMAIN_ID=frost-sync
 TILSIG_API_KEY=your-tilsig-key
 WYSSEN_API_KEY=your-wyssen-key
 SKRED_API_TOKEN=your-skred-token
+NETATMO_CLIENT_ID=your-netatmo-client-id
+NETATMO_CLIENT_SECRET=your-netatmo-client-secret
+NETATMO_REFRESH_TOKEN=your-netatmo-refresh-token
+NETATMO_ACCESS_TOKEN=your-netatmo-access-token
 ```
 
 ```powershell
@@ -59,10 +63,18 @@ Dei fire `latest*.geojson`-rutene er opne utan nøkkel. Tidsseriar og andre data
 
 `sync-metadata`, `run-hourly` og `prune-db` krev i dagens CLI at `FROST_CLIENT_ID` er sett, også når andre kjelder er konfigurerte.
 
+Netatmo-token må ha `read_station`. Integrasjonen hentar kontoen sine eigne, delte og favorittstasjonar, og brukar berre utemodulane til vêrdata. Fornya token blir lagra i `.netatmo_tokens.db`; webappen og jobbane må dele denne fila. Dei eksisterande stavevariantane `NETAMO_CLIENT_ID`, `NETATMO_SECRET_ID`, `NETAMO_ACCESS_TOKEN` og `NETAMO_REFRESH_TOKEN` er òg støtta. Sjå [Netatmo-oppsettet](docs/providers.md#netatmo).
+
 ## Utvikling
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+Vindroseberekningane i VertiGIS-uttrykket har òg regresjonstestar som kan køyrast med Node.js:
+
+```powershell
+node --test tests/test_vertigis_plot.cjs tests/test_vertigis_windrose.cjs
 ```
 
 Leverandørklientane ligg i `frost_sync/*_api.py` og `nve_hydapi.py`, synk og avleidde verdiar i `service.py`, database i `models.py`/`db.py`, og responsbygging i `web.py`. `app.py` kombinerer kart-API-et med dei eldre Frost-proxyrutene. Testane brukar lokale data og mockar; dei stadfestar ikkje tilgang til leverandørane i produksjon.

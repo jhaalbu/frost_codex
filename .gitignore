@@ -7,3 +7,4 @@ __pycache__/
 *.db-journal
 .vscode/
 settings.json
+.netatmo_tokens.db*

@@ -32,6 +32,7 @@ from frost_sync.snower_api import SnowerClient, SnowerMonitor
 from frost_sync.tilsig_api import TilsigClient, TilsigMonitor
 from frost_sync.wyssen_api import WyssenClient, WyssenMonitor
 from frost_sync.skred_api import SkredClient, SkredMonitor
+from frost_sync.netatmo_api import NetatmoClient, NetatmoMonitor, TARGET_ELEMENTS as NETATMO_TARGET_ELEMENTS
 from frost_sync.nve_veps import NveVepsClient, next_hbv_reference_time
 
 
@@ -102,6 +103,7 @@ class SyncService:
         wyssen_client: WyssenClient | None = None,
         skred_client: SkredClient | None = None,
         veps_client: NveVepsClient | None = None,
+        netatmo_client: NetatmoClient | None = None,
     ) -> None:
         self.session = session
         self.frost_client = frost_client
@@ -111,6 +113,7 @@ class SyncService:
         self.wyssen_client = wyssen_client
         self.skred_client = skred_client
         self.veps_client = veps_client
+        self.netatmo_client = netatmo_client
 
     def run_hourly_sync(
         self,
@@ -337,6 +340,35 @@ class SyncService:
                         station_errors += 1
         stage_started = _log_sync_stage("Skred AS", stage_started)
 
+        netatmo_station_count = 0
+        if self.netatmo_client is not None:
+            stations = {key: station for key, station in self._load_stations_by_provider("netatmo").items()
+                        if station.valid_to is None}
+            monitors = [NetatmoMonitor(s.source_id, s.name or s.source_id, s.longitude, s.latitude,
+                                      s.provider_context) for s in stations.values() if s.provider_context]
+            netatmo_station_count = len(monitors)
+            if monitors:
+                try:
+                    rows = self.netatmo_client.fetch_latest_observations(monitors)
+                    # Dashboard SumRain1h is a moving sum; it must not be accumulated.
+                    # Fetch closed, fixed hourly rain buckets from getmeasure instead.
+                    end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+                    for monitor in monitors:
+                        rows.extend(self.netatmo_client.fetch_observations_range(
+                            monitor.provider_context, end - timedelta(hours=2), end, ["precipitation_1h"],
+                        ))
+                    with self.session.begin_nested():
+                        changed = self._upsert_capabilities_from_rows(stations, rows)
+                        written, latest = self._store_observations_batch(stations, rows)
+                        self.session.flush()
+                    capabilities_updated += changed
+                    observations_written += written
+                    latest_updated += latest
+                except Exception as exc:
+                    logger.exception("Failed to sync Netatmo observations: %s", exc)
+                    station_errors += len(monitors)
+        stage_started = _log_sync_stage("Netatmo", stage_started)
+
         self.session.commit()
         _log_sync_stage("Database commit", stage_started)
         if self.veps_client is not None:
@@ -346,7 +378,7 @@ class SyncService:
         logger.info("Hourly sync completed in %.1fs", perf_counter() - sync_started)
 
         return SyncSummary(
-            stations_seen=frost_station_count + nve_station_count + snower_station_count + tilsig_station_count + wyssen_station_count + skred_station_count,
+            stations_seen=frost_station_count + nve_station_count + snower_station_count + tilsig_station_count + wyssen_station_count + skred_station_count + netatmo_station_count,
             capabilities_updated=capabilities_updated,
             observations_written=observations_written,
             latest_updated=latest_updated,
@@ -530,9 +562,22 @@ class SyncService:
                 logger.exception("Failed to discover Skred AS stations: %s", exc)
                 station_errors += 1
 
+        netatmo_station_count = 0
+        if self.netatmo_client is not None:
+            try:
+                monitors = self.netatmo_client.fetch_stations()
+                with self.session.begin_nested():
+                    changed = self._upsert_netatmo_stations(monitors)
+                    self.session.flush()
+                netatmo_station_count = len(monitors)
+                capabilities_updated += changed
+            except Exception as exc:
+                logger.exception("Failed to discover Netatmo stations: %s", exc)
+                station_errors += 1
+
         self.session.commit()
         return SyncSummary(
-            stations_seen=len(sources) + nve_station_count + snower_station_count + tilsig_station_count + wyssen_station_count + skred_station_count,
+            stations_seen=len(sources) + nve_station_count + snower_station_count + tilsig_station_count + wyssen_station_count + skred_station_count + netatmo_station_count,
             capabilities_updated=capabilities_updated,
             observations_written=0,
             latest_updated=0,
@@ -822,6 +867,36 @@ class SyncService:
             if source.masl is not None:
                 station.masl = source.masl
             station.last_seen_at = now
+
+    def _upsert_netatmo_stations(self, monitors: Iterable[NetatmoMonitor]) -> int:
+        now = datetime.now(timezone.utc)
+        existing = self._load_stations_by_provider("netatmo")
+        seen = set()
+        changed = 0
+        for monitor in monitors:
+            seen.add(monitor.source_id)
+            station = existing.get(monitor.source_id)
+            if station is None:
+                station = Station(source_id=monitor.source_id, provider="netatmo", last_seen_at=now)
+                self.session.add(station)
+            station.name = monitor.name
+            station.provider_context = monitor.provider_context
+            station.stationholder = "Netatmo"
+            station.longitude = monitor.longitude
+            station.latitude = monitor.latitude
+            station.masl = monitor.masl
+            station.country = monitor.country
+            station.last_seen_at = now
+            station.valid_to = None
+            self.session.flush()
+            changed += self._upsert_capabilities_for_elements(
+                station, NETATMO_TARGET_ELEMENTS, NetatmoClient.available_elements(monitor.provider_context),
+            )
+        # Only a successful full discovery revokes visibility. An outage does not.
+        for source_id, station in existing.items():
+            if source_id not in seen and station.valid_to is None:
+                station.valid_to = now
+        return changed
 
     def _load_stations_by_provider(self, provider: str) -> dict[str, Station]:
         return {

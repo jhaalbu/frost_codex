@@ -12,6 +12,7 @@ from frost_sync.snower_api import SnowerClient
 from frost_sync.tilsig_api import TilsigClient
 from frost_sync.wyssen_api import WyssenClient
 from frost_sync.skred_api import SkredClient
+from frost_sync.netatmo_api import create_netatmo_client
 
 
 def main() -> None:
@@ -107,6 +108,7 @@ def main() -> None:
                 tilsig_client=tilsig_client,
                 wyssen_client=wyssen_client,
                 skred_client=skred_client,
+                netatmo_client=create_netatmo_client(settings),
                 veps_client=nve_hydapi_client.veps_client if nve_hydapi_client else None,
             )
             if args.command == "sync-metadata":
