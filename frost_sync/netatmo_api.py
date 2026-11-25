@@ -9,10 +9,12 @@ from __future__ import annotations
 import hashlib
 from contextlib import closing
 import json
+import logging
 import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 import sqlite3
 import time
@@ -22,7 +24,12 @@ import requests
 
 from frost_sync.config import Settings
 
+logger = logging.getLogger(__name__)
+
 SOURCE_ID_PREFIX = "NETATMO-"
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+MAX_GET_ATTEMPTS = 3
+MAX_RETRY_DELAY_SECONDS = 60
 # Netatmo wind speeds are always km/h, independent of the user's display units.
 MODULE_FIELDS = {
     "NAModule1": {"air_temperature": ("temperature", "Temperature", "degC", 1)},
@@ -112,12 +119,50 @@ class NetatmoClient:
         self._seed = hashlib.sha256(f"{client_id}\0{refresh_token}".encode()).hexdigest()
 
     def _http(self, method: str, path: str, **kwargs) -> requests.Response:
-        try:
-            return self.session.request(method, f"https://api.netatmo.com{path}",
-                                        timeout=self.timeout_seconds, allow_redirects=False, **kwargs)
-        except requests.RequestException as exc:
-            # Do not include headers, credentials or response bodies in logs/errors.
-            raise RuntimeError(f"Netatmo network failure: {type(exc).__name__}") from None
+        # Only reads can be repeated safely. A token POST may already have
+        # rotated the refresh token even if its response never reached us.
+        attempts = MAX_GET_ATTEMPTS if method.upper() == "GET" else 1
+        for attempt in range(attempts):
+            try:
+                response = self.session.request(method, f"https://api.netatmo.com{path}",
+                                                timeout=self.timeout_seconds, allow_redirects=False, **kwargs)
+            except requests.RequestException as exc:
+                if isinstance(exc, (requests.ConnectionError, requests.Timeout)) and attempt + 1 < attempts:
+                    delay = 2 ** (attempt + 1)
+                    logger.warning("Netatmo %s: %s; retry %s/%s in %ss",
+                                   path, type(exc).__name__, attempt + 1, attempts - 1, delay)
+                    time.sleep(delay)
+                    continue
+                # Do not include headers, credentials or response bodies in logs/errors.
+                raise RuntimeError(f"Netatmo network failure: {type(exc).__name__}") from None
+            if response.status_code not in RETRYABLE_STATUS_CODES or attempt + 1 == attempts:
+                return response
+            delay = self._retry_delay(response, attempt)
+            if delay is None:
+                return response
+            logger.warning("Netatmo %s: HTTP %s; retry %s/%s in %.1fs",
+                           path, response.status_code, attempt + 1, attempts - 1, delay)
+            response.close()
+            time.sleep(delay)
+        raise RuntimeError("Netatmo request attempts exhausted")
+
+    @staticmethod
+    def _retry_delay(response: requests.Response, attempt: int) -> float | None:
+        delay = float(2 ** (attempt + 1))
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                seconds = float(retry_after)
+            except (TypeError, ValueError):
+                try:
+                    seconds = (_utc(parsedate_to_datetime(retry_after)) - datetime.now(timezone.utc)).total_seconds()
+                except (TypeError, ValueError, OverflowError):
+                    seconds = 0
+            if math.isfinite(seconds):
+                delay = max(delay, seconds)
+        # Do not retry early if the server requests a wait longer than this job
+        # allows. The next sync can try again without tying up a web worker.
+        return delay if delay <= MAX_RETRY_DELAY_SECONDS else None
 
     @staticmethod
     def _json(response: requests.Response) -> dict:
@@ -172,6 +217,10 @@ class NetatmoClient:
         for attempt in range(2):
             response = self._http("GET", f"/api/{endpoint}", params=params,
                                   headers={"Authorization": f"Bearer {token}"})
+            # Gateways may return HTML on 503. Keep the actual HTTP failure in
+            # the error message instead of reporting it as a JSON parsing error.
+            if not response.ok and response.status_code not in (401, 403):
+                raise RuntimeError(f"Netatmo API failure (HTTP {response.status_code})")
             payload = self._json(response)
             error = payload.get("error") or {}
             code = error.get("code") if isinstance(error, dict) else None

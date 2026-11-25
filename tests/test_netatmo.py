@@ -3,6 +3,7 @@ from contextlib import closing
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
@@ -40,8 +41,8 @@ DEVICE = {
 }
 
 
-def response(payload, status=200):
-    result = Mock(status_code=status, ok=200 <= status < 300)
+def response(payload, status=200, headers=None):
+    result = Mock(status_code=status, ok=200 <= status < 300, headers=headers or {})
     result.json.return_value = payload
     return result
 
@@ -106,7 +107,8 @@ class NetatmoClientTest(unittest.TestCase):
         self.assertEqual(http.call_args.kwargs["data"]["refresh_token"], "new-seed")
 
     def test_errors_do_not_expose_credentials_or_response(self):
-        with patch.object(self.client.session, "request", side_effect=requests.ConnectionError("secret seed old-access")):
+        with patch.object(self.client.session, "request", side_effect=requests.ConnectionError("secret seed old-access")), \
+             patch("frost_sync.netatmo_api.time.sleep"), self.assertLogs("frost_sync.netatmo_api", "WARNING"):
             with self.assertRaisesRegex(RuntimeError, "^Netatmo network failure: ConnectionError$"):
                 self.client.fetch_stations()
         self.client.access_token = None
@@ -115,6 +117,79 @@ class NetatmoClientTest(unittest.TestCase):
                 self.client.fetch_stations()
         self.assertNotIn("secret", str(raised.exception))
         self.assertNotIn("seed", str(raised.exception))
+
+    def test_temporary_503_recovers_without_refreshing_tokens(self):
+        unavailable = response(None, 503)
+        unavailable.json.side_effect = ValueError("HTML gateway error")
+        with patch.object(self.client.session, "request", side_effect=[
+            unavailable, response({"error": {}}, 502), response({"body": {"devices": [DEVICE]}}),
+        ]) as request, patch("frost_sync.netatmo_api.time.sleep") as sleep, \
+             self.assertLogs("frost_sync.netatmo_api", "WARNING") as logs:
+            monitors = self.client.fetch_stations()
+        self.assertEqual(len(monitors), 1)
+        self.assertEqual(request.call_count, 3)
+        self.assertTrue(all(call.args[0] == "GET" for call in request.call_args_list))
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
+        self.assertEqual(len(logs.records), 2)
+        unavailable.json.assert_not_called()
+        unavailable.close.assert_called_once()
+        self.assertTrue(all("secret" not in record.getMessage() and "old-access" not in record.getMessage()
+                            for record in logs.records))
+
+    def test_persistent_503_stops_after_three_attempts_with_the_http_status(self):
+        unavailable = response(None, 503)
+        unavailable.json.side_effect = ValueError("HTML gateway error")
+        with patch.object(self.client.session, "request", return_value=unavailable) as request, \
+             patch("frost_sync.netatmo_api.time.sleep") as sleep, \
+             self.assertLogs("frost_sync.netatmo_api", "WARNING"):
+            with self.assertRaisesRegex(RuntimeError, r"^Netatmo API failure \(HTTP 503\)$"):
+                self.client.fetch_stations()
+        self.assertEqual(request.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        unavailable.json.assert_not_called()
+
+    def test_read_timeout_retries_but_token_rotation_post_does_not(self):
+        with patch.object(self.client.session, "request", side_effect=[
+            requests.ReadTimeout("secret"), response({"body": {"devices": []}}),
+        ]) as request, patch("frost_sync.netatmo_api.time.sleep") as sleep, \
+             self.assertLogs("frost_sync.netatmo_api", "WARNING"):
+            self.assertEqual(self.client.fetch_stations(), [])
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_called_once_with(2)
+        self.client.access_token = None
+        with patch.object(self.client.session, "request", side_effect=requests.ReadTimeout("secret")) as request, \
+             patch("frost_sync.netatmo_api.time.sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "^Netatmo network failure: ReadTimeout$"):
+                self.client.fetch_stations()
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(request.call_args.args[0], "POST")
+        sleep.assert_not_called()
+
+    def test_rate_limit_respects_retry_after_and_does_not_retry_other_client_errors(self):
+        with patch.object(self.client.session, "request", side_effect=[
+            response({}, 429, {"Retry-After": "10"}), response({"body": {"devices": []}}),
+        ]), patch("frost_sync.netatmo_api.time.sleep") as sleep, \
+             self.assertLogs("frost_sync.netatmo_api", "WARNING"):
+            self.assertEqual(self.client.fetch_stations(), [])
+        sleep.assert_called_once_with(10)
+        now = datetime(2026, 11, 25, 17, 30, tzinfo=timezone.utc)
+        retry_at = format_datetime(now + timedelta(seconds=20), usegmt=True)
+        with patch.object(self.client.session, "request", side_effect=[
+            response({}, 503, {"Retry-After": retry_at}), response({"body": {"devices": []}}),
+        ]), patch("frost_sync.netatmo_api.time.sleep") as sleep, \
+             patch("frost_sync.netatmo_api.datetime") as clock, \
+             self.assertLogs("frost_sync.netatmo_api", "WARNING"):
+            clock.now.return_value = now
+            self.assertEqual(self.client.fetch_stations(), [])
+        sleep.assert_called_once_with(20)
+        for status, headers in [(429, {"Retry-After": "120"}), (400, {}), (404, {})]:
+            with self.subTest(status=status), \
+                 patch.object(self.client.session, "request", return_value=response({}, status, headers)) as request, \
+                 patch("frost_sync.netatmo_api.time.sleep") as sleep:
+                with self.assertRaisesRegex(RuntimeError, f"HTTP {status}"):
+                    self.client.fetch_stations()
+                self.assertEqual(request.call_count, 1)
+                sleep.assert_not_called()
 
     def test_outdoor_only_per_module_time_units_and_missing_values(self):
         devices = [copy.deepcopy(DEVICE), {**copy.deepcopy(DEVICE), "_id": "70:ee:50:00:00:02"}]
