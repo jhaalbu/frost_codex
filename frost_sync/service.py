@@ -435,8 +435,19 @@ class SyncService:
         return updated, errors
 
     def sync_metadata(self, page_limit: int) -> SyncSummary:
+        existing_source_ids = set(self.session.scalars(select(Station.source_id)))
+        provider_source_ids: dict[str, set[str]] = {"frost": set()}
+        for provider, client in (
+            ("nve_hydapi", self.nve_hydapi_client), ("snower", self.snower_client),
+            ("tilsig", self.tilsig_client), ("wyssen", self.wyssen_client),
+            ("skred", self.skred_client), ("netatmo", self.netatmo_client),
+        ):
+            if client is not None:
+                provider_source_ids[provider] = set()
+        provider_errors: set[str] = set()
         sources = self.frost_client.fetch_sources(page_limit=page_limit)
         stations_by_source = self._upsert_stations(sources)
+        provider_source_ids["frost"] = {source.source_id for source in sources}
         capabilities_updated = 0
         station_errors = 0
 
@@ -462,6 +473,7 @@ class SyncService:
             nve_stations = self.nve_hydapi_client.fetch_stations()
             self._upsert_nve_stations(nve_stations)
             nve_station_count = len(nve_stations)
+            provider_source_ids["nve_hydapi"] = {station.source_id for station in nve_stations}
             try:
                 discovered_nve_specs = self.nve_hydapi_client.fetch_series_specs_for_stations(
                     [station.source_id for station in nve_stations]
@@ -509,7 +521,7 @@ class SyncService:
                 )
                 if percentile_rows_updated:
                     logger.info("NVE discharge percentiles updated rows=%s", percentile_rows_updated)
-                flood_rows_updated = self._sync_nve_discharge_flood_thresholds(
+                self._sync_nve_discharge_flood_thresholds(
                     series_specs=[
                         spec
                         for spec in preferred_nve_specs
@@ -517,8 +529,6 @@ class SyncService:
                     ],
                     stations_by_source=nve_stations_by_source,
                 )
-                if flood_rows_updated:
-                    logger.info("NVE discharge flood thresholds updated rows=%s", flood_rows_updated)
 
         snower_station_count = 0
         if self.snower_client is not None:
@@ -526,8 +536,10 @@ class SyncService:
                 snower_monitors = self.snower_client.fetch_stations()
                 self._upsert_snower_stations(snower_monitors)
                 snower_station_count = len(snower_monitors)
+                provider_source_ids["snower"] = {monitor.source_id for monitor in snower_monitors}
             except Exception as exc:
                 logger.warning("Failed to discover Snower monitors: %s", exc)
+                provider_errors.add("snower")
                 station_errors += 1
 
         tilsig_station_count = 0
@@ -536,8 +548,10 @@ class SyncService:
                 tilsig_monitors = self.tilsig_client.fetch_stations()
                 self._upsert_tilsig_stations(tilsig_monitors)
                 tilsig_station_count = len(tilsig_monitors)
+                provider_source_ids["tilsig"] = {monitor.source_id for monitor in tilsig_monitors}
             except Exception as exc:
                 logger.warning("Failed to discover Tilsig stations: %s", exc)
+                provider_errors.add("tilsig")
                 station_errors += 1
 
         wyssen_station_count = 0
@@ -546,9 +560,10 @@ class SyncService:
                 wyssen_monitors = self.wyssen_client.fetch_stations()
                 self._upsert_wyssen_stations(wyssen_monitors)
                 wyssen_station_count = len(wyssen_monitors)
-                logger.info("Wyssen: registered %s towers", wyssen_station_count)
+                provider_source_ids["wyssen"] = {monitor.source_id for monitor in wyssen_monitors}
             except Exception as exc:
                 logger.warning("Failed to discover Wyssen stations: %s", exc)
+                provider_errors.add("wyssen")
                 station_errors += 1
 
         skred_station_count = 0
@@ -557,9 +572,10 @@ class SyncService:
                 skred_monitors = self.skred_client.fetch_stations()
                 self._upsert_skred_stations(skred_monitors)
                 skred_station_count = len(skred_monitors)
-                logger.info("Skred AS: registered %s stations", skred_station_count)
+                provider_source_ids["skred"] = {monitor.source_id for monitor in skred_monitors}
             except Exception as exc:
                 logger.exception("Failed to discover Skred AS stations: %s", exc)
+                provider_errors.add("skred")
                 station_errors += 1
 
         netatmo_station_count = 0
@@ -571,11 +587,20 @@ class SyncService:
                     self.session.flush()
                 netatmo_station_count = len(monitors)
                 capabilities_updated += changed
+                provider_source_ids["netatmo"] = {monitor.source_id for monitor in monitors}
             except Exception as exc:
                 logger.exception("Failed to discover Netatmo stations: %s", exc)
+                provider_errors.add("netatmo")
                 station_errors += 1
 
         self.session.commit()
+        for provider, source_ids in provider_source_ids.items():
+            registered = len(source_ids - existing_source_ids)
+            logger.info(
+                "Metadata %s: registered=%s updated=%s total=%s failed=%s",
+                provider, registered, len(source_ids) - registered, len(source_ids),
+                int(provider in provider_errors),
+            )
         return SyncSummary(
             stations_seen=len(sources) + nve_station_count + snower_station_count + tilsig_station_count + wyssen_station_count + skred_station_count + netatmo_station_count,
             capabilities_updated=capabilities_updated,
@@ -1193,13 +1218,15 @@ class SyncService:
         if self.nve_hydapi_client is None:
             return 0
 
-        updated = 0
+        updated = unchanged = failed = skipped = 0
         for spec in series_specs:
             station = stations_by_source.get(spec.source_id)
             if station is None:
+                skipped += 1
                 continue
             if spec.version_number is None:
-                logger.info(
+                skipped += 1
+                logger.debug(
                     "Skipping NVE flood thresholds for %s because the discharge series version is unknown.",
                     spec.source_id,
                 )
@@ -1210,9 +1237,16 @@ class SyncService:
                     series_version=spec.version_number,
                 )
             except Exception as exc:
-                logger.warning("Failed to sync NVE flood thresholds for %s: %s", spec.source_id, exc)
+                failed += 1
+                logger.debug("Failed to sync NVE flood thresholds for %s: %s", spec.source_id, exc)
                 continue
-            updated += self._upsert_nve_discharge_flood_threshold(station, thresholds)
+            changed = self._upsert_nve_discharge_flood_threshold(station, thresholds)
+            updated += changed
+            unchanged += int(not changed)
+        logger.info(
+            "NVE flood thresholds: updated=%s unchanged=%s failed=%s skipped=%s",
+            updated, unchanged, failed, skipped,
+        )
         return updated
 
     def _upsert_nve_discharge_flood_threshold(

@@ -50,6 +50,10 @@ Databasen lagrar `stations` (metadata, koordinatar, leverandør og `provider_con
 
 `sync-metadata` byggjer ikkje GeoJSON-cache. Etter nye kjelder: køyr metadata, så timejobb. Unngå overlappande timejobbar og cachebyggingar; alle brukar dei same `.tmp`-filnamna. Utskrift med `station_errors > 0` eller kjeldefeil i loggen krev oppfølging sjølv om prosessen avsluttar normalt.
 
+Etter vellukka databasecommit skriv metadatajobben éi oppsummering per konfigurert leverandør: `Metadata <provider>: registered=... updated=... total=... failed=...`. `registered` er nye stasjonar, og `updated` er eksisterande stasjonar som vart oppfriska i denne køyringa, også når metadataverdiane er uendra. `total` gjeld stasjonane som faktisk vart returnerte og registrerte, ikkje alle historiske stasjonar i databasen. `failed=1` tyder at metadatahenting/-registrering feila for leverandøren; ei tom, vellukka liste gir `failed=0`.
+
+NVE-flaumtersklar har ei samla melding: `NVE flood thresholds: updated=... unchanged=... failed=... skipped=...`. Her tel `updated` nye/endra terskelrader, `unchanged` vellukka henting med uendra verdiar, `failed` feila henting (inkludert ufullstendige tersklar), og `skipped` manglande stasjon eller serieversjon. Stasjonsvise feildetaljar blir berre skrivne på `DEBUG`-nivå. Tidlegare lagra tersklar blir behaldne ved hentefeil.
+
 Kvar cachefil blir skriven til ei mellombels fil og erstatta. Heile samlinga av JSON/gzip-filer blir ikkje bytt atomisk, og databasecommit skjer før cachebygging. Ein feil her kan gi nye databaseverdiar med eldre kartfiler.
 
 Standardretensjon på 14 dagar gir rom for sjudøgnslag med 24 timars ekstra nedbørstilbakeblikk. For komplett `precipitation_24h_max` i heile sjudøgnsvindauget trengst minst åtte dagar med faktisk innsamla historikk. Retensjon fyller ikkje datagap og startar ikkje historisk tilbakefylling.
